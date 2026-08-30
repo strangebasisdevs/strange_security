@@ -1,0 +1,20 @@
+name: Security gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  semgrep:
+    name: Semgrep
+    uses: strangebasisdevs/strange_security/workflows/semgrep.yml@main
+
+  trivy:
+    name: Trivy
+    uses: strangebasisdevs/strange_security/workflows/trivy.yml@main
