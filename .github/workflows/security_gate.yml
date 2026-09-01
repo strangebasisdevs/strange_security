@@ -13,8 +13,8 @@ permissions:
 jobs:
   semgrep:
     name: Semgrep
-    uses: strangebasisdevs/strange_security/.github/workflows/semgrep.yml@main
+    uses: ./.github/workflows/semgrep.yml
 
   trivy:
     name: Trivy
-    uses: strangebasisdevs/strange_security/.github/workflows/trivy.yml@main
+    uses: ./.github/workflows/trivy.yml

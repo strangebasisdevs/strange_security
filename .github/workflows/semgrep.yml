@@ -17,10 +17,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run Semgrep
-        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        with:
-          config: p/default
-          generateSarif: "1"
+        run: |
+          docker run --rm \
+            --volume "$PWD:/src" \
+            semgrep/semgrep:1.175.0@sha256:b94b53d02fd4a022f9eac4e2af1380f5c3c4c21400e79d3336bdff1d1db5e796 \
+            semgrep scan --config p/default --sarif --output /src/semgrep.sarif /src
 
       - name: Upload SARIF results
         if: always()

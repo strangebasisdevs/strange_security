@@ -71,9 +71,10 @@ uploaded for review.
 
 ## Maintenance
 
-Third-party actions are pinned to full commit SHAs to reduce supply-chain risk.
-Dependabot checks GitHub Actions dependencies every Monday at 09:00 UTC and
-opens updates with the `dependencies` and `github-actions` labels.
+Third-party actions are pinned to full commit SHAs, and scanner container
+images are pinned to immutable digests, to reduce supply-chain risk. Dependabot
+checks GitHub Actions dependencies every Monday at 09:00 UTC and opens updates
+with the `dependencies` and `github-actions` labels.
 
 Changes to these workflows affect every repository that references `@main`.
 Review and test updates in this repository before merging them to `main`.
