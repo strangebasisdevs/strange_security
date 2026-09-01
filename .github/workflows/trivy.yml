@@ -4,6 +4,7 @@ on:
   workflow_call:
 
 permissions:
+  actions: read
   contents: read
   security-events: write
 
@@ -15,18 +16,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Run Trivy
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          format: sarif
-          output: trivy-results.sarif
-          exit-code: "1"
+        run: |
+          docker run --rm \
+            --volume "$PWD:/src" \
+            aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+            fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+            --format sarif --output /src/trivy-results.sarif --exit-code 1 /src
 
       - name: Upload SARIF results
         if: always()
