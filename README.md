@@ -32,9 +32,9 @@ on:
       - main
 
 permissions:
+  actions: read
   contents: read
   security-events: write
-
 jobs:
   semgrep:
     name: Semgrep
