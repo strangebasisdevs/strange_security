@@ -8,6 +8,7 @@
       "description": "Actions/runners/reusable workflows stay managed by Dependabot; Renovate only handles the container: image: pins below",
       "matchManagers": ["github-actions"],
       "matchDepTypes": ["action", "workflow", "github-runner", "uses-with", "service"],
+      "minimumReleaseAge": "7 days",
       "enabled": false
     },
     {
@@ -23,6 +24,7 @@
       "matchManagers": ["github-actions"],
       "matchDepTypes": ["container"],
       "matchPackageNames": ["!semgrep/semgrep", "!aquasec/trivy"],
+      "minimumReleaseAge": "7 days",
       "enabled": false
     }
   ]
