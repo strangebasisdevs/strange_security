@@ -1,0 +1,29 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "enabledManagers": ["github-actions"],
+  "timezone": "Etc/UTC",
+  "schedule": ["before 9am on monday"],
+  "packageRules": [
+    {
+      "description": "Actions/runners/reusable workflows stay managed by Dependabot; Renovate only handles the container: image: pins below",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["action", "workflow", "github-runner", "uses-with", "service"],
+      "enabled": false
+    },
+    {
+      "description": "Semgrep and Trivy scanner images: wait 7 days before proposing a new tag/digest, to reduce exposure to supply-chain attacks via freshly published images",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["container"],
+      "matchPackageNames": ["semgrep/semgrep", "aquasec/trivy"],
+      "minimumReleaseAge": "7 days",
+      "labels": ["dependencies", "docker"]
+    },
+    {
+      "description": "Safety net: ignore any other container image that might get added to workflows later",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["container"],
+      "matchPackageNames": ["!semgrep/semgrep", "!aquasec/trivy"],
+      "enabled": false
+    }
+  ]
+}
