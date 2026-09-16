@@ -19,9 +19,31 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve shared workflow source
+        id: shared
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          echo "repository=${WORKFLOW_REF%%/.github/*}" >> "$GITHUB_OUTPUT"
+          echo "ref=${WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile lives in this workflow's repository, so check it out at the
+      # ref the caller referenced instead of relying on the caller's checkout.
+      - name: Checkout shared workflow repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.shared.outputs.repository }}
+          ref: ${{ steps.shared.outputs.ref }}
+          path: .strange-security
+          persist-credentials: false
+
       # Image version lives in .github/docker/trivy.Dockerfile, the single spot Dependabot updates.
       - name: Build Trivy image
-        run: docker build --file .github/docker/trivy.Dockerfile --tag trivy-scanner .
+        run: |
+          docker build \
+            --file .strange-security/.github/docker/trivy.Dockerfile \
+            --tag trivy-scanner \
+            .strange-security
 
       - name: Run Trivy
         run: |
@@ -30,6 +52,7 @@ jobs:
             --workdir /src \
             trivy-scanner \
             fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+            --skip-dirs .strange-security \
             --format sarif --output /src/trivy-results.sarif --exit-code 1 /src
 
       - name: Upload SARIF results
