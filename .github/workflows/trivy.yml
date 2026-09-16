@@ -12,10 +12,6 @@ jobs:
   trivy:
     name: Trivy filesystem scan
     runs-on: ubuntu-latest
-    # Run the job inside the Trivy image itself rather than shelling out to
-    # `docker run` on the runner (mirrors Semgrep's recommended container job pattern).
-    container:
-      image: aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
 
     steps:
       - name: Checkout repository
@@ -23,11 +19,18 @@ jobs:
         with:
           persist-credentials: false
 
+      # Image version lives in .github/docker/trivy.Dockerfile, the single spot Dependabot updates.
+      - name: Build Trivy image
+        run: docker build --file .github/docker/trivy.Dockerfile --tag trivy-scanner .
+
       - name: Run Trivy
-        shell: sh
         run: |
-          trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
-            --format sarif --output trivy-results.sarif --exit-code 1 .
+          docker run --rm \
+            --volume "$PWD:/src" \
+            --workdir /src \
+            trivy-scanner \
+            fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+            --format sarif --output /src/trivy-results.sarif --exit-code 1 /src
 
       - name: Upload SARIF results
         if: always()

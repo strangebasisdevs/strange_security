@@ -12,10 +12,6 @@ jobs:
   semgrep:
     name: Semgrep scan
     runs-on: ubuntu-latest
-    # Official Semgrep-recommended pattern: run the job inside the Semgrep
-    # image itself rather than shelling out to `docker run` on the runner.
-    container:
-      image: semgrep/semgrep:1.175.0@sha256:b94b53d02fd4a022f9eac4e2af1380f5c3c4c21400e79d3336bdff1d1db5e796
 
     steps:
       - name: Checkout repository
@@ -23,8 +19,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # Image version lives in .github/docker/semgrep.Dockerfile, the single spot Dependabot updates.
+      - name: Build Semgrep image
+        run: docker build --file .github/docker/semgrep.Dockerfile --tag semgrep-scanner .
+
       - name: Run Semgrep
-        run: semgrep scan --config p/default --sarif --output semgrep.sarif .
+        run: |
+          docker run --rm \
+            --volume "$PWD:/src" \
+            --workdir /src \
+            semgrep-scanner \
+            semgrep scan --config p/default --sarif --output /src/semgrep.sarif /src
 
       - name: Upload SARIF results
         if: always()
