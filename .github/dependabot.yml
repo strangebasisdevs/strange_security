@@ -16,18 +16,7 @@ updates:
     cooldown:
       default-days: 7
 
-  # Tracks the semgrep/semgrep and aquasec/trivy image tags referenced via
-  # `container: image:` in the security scan workflows.
-  - package-ecosystem: docker
-    directory: /.github/workflows
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: Etc/UTC
-    open-pull-requests-limit: 10
-    labels:
-      - dependencies
-      - docker
-    cooldown:
-      default-days: 7
+# Note: Dependabot's `docker` ecosystem requires an actual Dockerfile/Containerfile
+# in the target directory and does not scan `container: image:` references inside
+# GitHub Actions workflow files, so the semgrep/semgrep and aquasec/trivy pins in
+# .github/workflows/semgrep.yml and trivy.yml must be bumped manually.
