@@ -15,19 +15,3 @@ updates:
     # supply-chain attacks (compromised releases are usually caught/yanked quickly).
     cooldown:
       default-days: 7
-
-  # Tracks the semgrep/semgrep and aquasec/trivy image tags referenced via
-  # `container: image:` in the security scan workflows.
-  - package-ecosystem: docker
-    directory: /.github/workflows
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: Etc/UTC
-    open-pull-requests-limit: 10
-    labels:
-      - dependencies
-      - docker
-    cooldown:
-      default-days: 7
