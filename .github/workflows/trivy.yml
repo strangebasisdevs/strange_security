@@ -12,10 +12,6 @@ jobs:
   trivy:
     name: Trivy filesystem scan
     runs-on: ubuntu-latest
-    # Run the job inside the Trivy image itself rather than shelling out to
-    # `docker run` on the runner (mirrors Semgrep's recommended container job pattern).
-    container:
-      image: aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
 
     steps:
       - name: Checkout repository
@@ -23,11 +19,41 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run Trivy
-        shell: sh
+      - name: Resolve shared workflow source
+        id: shared
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
-          trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
-            --format sarif --output trivy-results.sarif --exit-code 1 .
+          echo "repository=${WORKFLOW_REF%%/.github/*}" >> "$GITHUB_OUTPUT"
+          echo "ref=${WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile lives in this workflow's repository, so check it out at the
+      # ref the caller referenced instead of relying on the caller's checkout.
+      - name: Checkout shared workflow repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.shared.outputs.repository }}
+          ref: ${{ steps.shared.outputs.ref }}
+          path: .strange-security
+          persist-credentials: false
+
+      # Image version lives in .github/docker/trivy.Dockerfile, the single spot Dependabot updates.
+      - name: Build Trivy image
+        run: |
+          docker build \
+            --file .strange-security/.github/docker/trivy.Dockerfile \
+            --tag trivy-scanner \
+            .strange-security
+
+      - name: Run Trivy
+        run: |
+          docker run --rm \
+            --volume "$PWD:/src" \
+            --workdir /src \
+            trivy-scanner \
+            fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+            --skip-dirs .strange-security \
+            --format sarif --output /src/trivy-results.sarif --exit-code 1 /src
 
       - name: Upload SARIF results
         if: always()

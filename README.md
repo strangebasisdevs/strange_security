@@ -15,7 +15,10 @@ repositories. Results are uploaded to GitHub code scanning as SARIF.
 | `trivy.yml` | Filesystem vulnerabilities and secrets | Reports `HIGH` and `CRITICAL` findings, ignores unfixed vulnerabilities, and fails the job when findings are detected |
 
 Both workflows run on `ubuntu-latest`, check out the caller repository, and
-upload results even when a scan reports findings.
+upload results even when a scan reports findings. They also check out this
+repository at the ref the caller referenced into `.strange-security` so the
+Dependabot-pinned scanner images in `.github/docker/` can be built; that
+directory is excluded from the scans.
 
 ## Usage
 
