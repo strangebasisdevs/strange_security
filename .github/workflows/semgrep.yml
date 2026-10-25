@@ -61,6 +61,8 @@ jobs:
             --tag semgrep-scanner \
             .strange-security
 
+      # --error exits non-zero on any finding, so findings fail the job; the
+      # upload below still runs and records them in code scanning.
       - name: Run Semgrep
         run: |
           docker run --rm \
@@ -68,7 +70,7 @@ jobs:
             --workdir /src \
             semgrep-scanner \
             semgrep scan --config p/default --exclude .strange-security \
-            --sarif --output /src/semgrep.sarif /src
+            --error --sarif --output /src/semgrep.sarif /src
 
       - name: Upload SARIF results
         if: always()
