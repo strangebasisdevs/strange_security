@@ -93,7 +93,9 @@ scan fails, so both reports are uploaded.
 
 Gitleaks checks out the caller with full history (`fetch-depth: 0`) and scans
 every commit, so a secret that was committed and later deleted still fails the
-job. Findings are redacted in the log and uploaded to the `gitleaks` category.
+job. Merge commits are diffed against each parent (`git log -m`), so a secret
+added while resolving a conflict is caught too, though a secret merged in from
+a branch can be reported twice. Findings are redacted in the log and uploaded to the `gitleaks` category.
 A finding means the credential is already public: rotate it first.
 
 It uses the gitleaks release binary, checked against its published sha256,

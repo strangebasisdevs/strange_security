@@ -42,9 +42,17 @@ jobs:
       # A finding means the credential is public: rotate it first, then decide
       # whether to rewrite history. --redact keeps secret values out of the log
       # and the SARIF report.
+      #
+      # --log-opts replaces gitleaks' default git log options, so it repeats
+      # them (--full-history --all --diff-filter=tuxdb) and adds -m. Without -m
+      # git log prints no patch for merge commits, so a secret added while
+      # resolving a merge conflict and removed later would go unscanned. -m
+      # diffs a merge against each parent, so a secret merged in from a branch
+      # can be reported twice.
       - name: Run gitleaks history scan
         run: |
           gitleaks git --no-banner --redact --exit-code 1 \
+            --log-opts="-m --full-history --all --diff-filter=tuxdb" \
             --report-format sarif --report-path gitleaks.sarif .
 
       - name: Upload SARIF results
