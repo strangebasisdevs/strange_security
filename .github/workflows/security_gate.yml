@@ -54,3 +54,7 @@ jobs:
   trivy:
     name: Trivy
     uses: ./.github/workflows/trivy.yml
+
+  gitleaks:
+    name: Gitleaks
+    uses: ./.github/workflows/gitleaks.yml

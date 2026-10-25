@@ -1,0 +1,55 @@
+name: Gitleaks
+
+on:
+  workflow_call:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  gitleaks:
+    name: Gitleaks history scan
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so a secret that was added and removed inside a PR
+          # still fails here. Trivy's secret scan reads the working tree only.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Not the gitleaks GitHub Action (organisation licence key, one more action
+      # to trust): the release binary, checked against its published sha256.
+      # Dependabot does not track this pin; bump the version and hash together.
+      - name: Install gitleaks
+        shell: bash
+        run: |
+          archive="gitleaks_8.30.1_linux_x64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$archive"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/$archive" \
+            | sha256sum --check --status
+          mkdir -p "$RUNNER_TEMP/gitleaks-bin"
+          tar --extract --gzip --file "$RUNNER_TEMP/$archive" \
+            --directory "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
+
+      # A finding means the credential is public: rotate it first, then decide
+      # whether to rewrite history. --redact keeps secret values out of the log
+      # and the SARIF report.
+      - name: Run gitleaks history scan
+        run: |
+          gitleaks git --no-banner --redact --exit-code 1 \
+            --report-format sarif --report-path gitleaks.sarif .
+
+      - name: Upload SARIF results
+        if: always()
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
