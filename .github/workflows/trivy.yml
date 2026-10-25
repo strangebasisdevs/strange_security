@@ -11,7 +11,7 @@ permissions:
 jobs:
   trivy:
     name: Trivy filesystem scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
@@ -19,45 +19,85 @@ jobs:
         with:
           persist-credentials: false
 
+      # In a called workflow the github context belongs to the caller, so
+      # github.workflow_ref names the caller's workflow. job.workflow_repository
+      # and job.workflow_sha name this file's own repository and commit. Fail
+      # if they are empty: actions/checkout would silently fall back to the caller.
       - name: Resolve shared workflow source
         id: shared
         env:
-          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
-          echo "repository=${WORKFLOW_REF%%/.github/*}" >> "$GITHUB_OUTPUT"
-          echo "ref=${WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
+          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_repository or job.workflow_sha is empty"
+            exit 1
+          fi
+          echo "repository=$WORKFLOW_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
-      # The Dockerfile lives in this workflow's repository, so check it out at the
-      # ref the caller referenced instead of relying on the caller's checkout.
+      # The Dockerfile lives in this workflow's repository, so check it out at
+      # the exact commit this workflow file came from.
       - name: Checkout shared workflow repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.shared.outputs.repository }}
-          ref: ${{ steps.shared.outputs.ref }}
+          ref: ${{ steps.shared.outputs.sha }}
           path: .strange-security
           persist-credentials: false
 
+      - name: Verify shared workflow checkout
+        env:
+          WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
+        run: |
+          test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
+          test -d .strange-security/.github/docker
+
       # Image version lives in .github/docker/trivy.Dockerfile, the single spot Dependabot updates.
       - name: Build Trivy image
+        id: build
         run: |
           docker build \
             --file .strange-security/.github/docker/trivy.Dockerfile \
             --tag trivy-scanner \
             .strange-security
 
-      - name: Run Trivy
+      # Unfiltered by severity: --severity also filters the secret scanner,
+      # and some built-in secret rules are below HIGH. Any secret fails.
+      - name: Run Trivy secret scan
         run: |
           docker run --rm \
             --volume "$PWD:/src" \
             --workdir /src \
             trivy-scanner \
-            fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+            fs --scanners secret \
             --skip-dirs .strange-security \
-            --format sarif --output /src/trivy-results.sarif --exit-code 1 /src
+            --format sarif --output /src/trivy-secret.sarif --exit-code 1 /src
 
-      - name: Upload SARIF results
+      # Runs even when the secret scan failed, so both reports are uploaded.
+      - name: Run Trivy vulnerability scan
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker run --rm \
+            --volume "$PWD:/src" \
+            --workdir /src \
+            trivy-scanner \
+            fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --skip-dirs .strange-security \
+            --format sarif --output /src/trivy-vuln.sarif --exit-code 1 /src
+
+      # Code scanning takes one SARIF run per category. Vulnerabilities keep
+      # the existing trivy category; secrets get their own.
+      - name: Upload secret scan SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
-          sarif_file: trivy-results.sarif
+          sarif_file: trivy-secret.sarif
+          category: trivy-secret
+
+      - name: Upload vulnerability scan SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: trivy-vuln.sarif
           category: trivy
