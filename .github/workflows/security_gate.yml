@@ -38,8 +38,9 @@ jobs:
             fi
             if grep -q '\.strange-security' "$file"; then
               for key in 'job.workflow_repository' 'job.workflow_sha'; do
-                if ! grep -qF "\${{ $key }}" "$file"; then
-                  echo "::error file=$file::checks out .strange-security without \${{ $key }}"
+                # No literal dollar-brace-brace here: Actions would parse it as an expression.
+                if ! grep -qF "{{ $key }}" "$file"; then
+                  echo "::error file=$file::checks out .strange-security without $key"
                   status=1
                 fi
               done
