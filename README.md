@@ -14,8 +14,9 @@ repositories. Results are uploaded to GitHub code scanning as SARIF.
 | `semgrep.yml` | Static analysis using Semgrep's `p/default` ruleset | Any finding |
 | `trivy.yml` | Secrets in the working tree, and filesystem dependency vulnerabilities | Any secret, at any severity; `HIGH` or `CRITICAL` vulnerabilities that have a fix |
 | `gitleaks.yml` | Secrets anywhere in the git history | Any finding |
+| `trivy-image.yml` | Secrets and OS/package vulnerabilities in one container image, by digest | Any secret, at any severity; `HIGH` or `CRITICAL` vulnerabilities that have a fix |
 
-All three run on `ubuntu-24.04`, check out the caller repository, and upload
+All of them run on `ubuntu-24.04`, check out the caller repository, and upload
 their SARIF reports even when a scan fails the job.
 
 Semgrep and Trivy also check out this repository into `.strange-security`, at
@@ -63,6 +64,45 @@ The caller must grant `contents: read` so scans can check out its source and
 Calling at `@main` is the organisation's one exception to SHA pinning, and it
 applies only to these org-owned reusable workflows.
 
+### Scanning a container image
+
+`trivy-image.yml` scans one published image, addressed by digest. It is meant
+for release workflows: push the image untagged, scan it, and tag it only when
+the scan passes. Pass the image reference without a tag, and the digest that
+the push returned:
+
+```yaml
+jobs:
+  publish:
+    # ... builds and pushes the image untagged, then exposes its digest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+
+  scan:
+    name: Trivy image
+    needs: publish
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    uses: strangebasisdevs/strange_security/.github/workflows/trivy-image.yml@main
+    with:
+      image: ghcr.io/strangebasisdevs/strange_ringtone
+      digest: ${{ needs.publish.outputs.digest }}
+
+  tag:
+    needs: [publish, scan]
+    # ... tags the digest only after the scan job succeeded
+```
+
+The job is named `Trivy image scan`. The workflow scans exactly
+`image@digest` and rejects an `image` that carries a tag or digest, or a
+`digest` that is not `sha256:` plus 64 hex characters. It logs in to GHCR as
+`github.actor` with the caller's `GITHUB_TOKEN`, so the caller must also grant
+`packages: read`; no secrets are passed. That covers private images in the same
+organisation, provided the calling repository has read access to the package.
+
 Pull requests from forks get a read-only `GITHUB_TOKEN`, so the SARIF upload
 steps fail there even when the scans pass. Do not work around this with
 `pull_request_target` or `workflow_run`: both run with write access next to
@@ -88,6 +128,24 @@ Trivy runs two scans over the caller's checked-out filesystem:
 
 Either scan fails the job. The vulnerability scan still runs when the secret
 scan fails, so both reports are uploaded.
+
+### Trivy image
+
+Trivy image runs the same two scans as Trivy, against the image instead of
+the working tree:
+
+- **Secrets** in the image layers, at every severity, uploaded to the
+  `trivy-image-secret/<image>` category.
+- **Vulnerabilities** in OS packages and language dependencies, `HIGH` and
+  `CRITICAL` only, ignoring those without a fix, uploaded to the
+  `trivy-image/<image>` category.
+
+Either scan fails the job, and both reports are uploaded either way. The
+categories include the image name, so a caller that scans several images
+keeps a separate code scanning result for each. The runner's Docker daemon
+pulls the image after logging in, and Trivy reads it through the Docker
+socket, so the registry credentials never enter the Trivy container. The
+caller's `.trivyignore` and `trivy.yaml` apply, as for the filesystem scan.
 
 ### Gitleaks
 
