@@ -31,14 +31,15 @@ jobs:
         env:
           IMAGE: ${{ inputs.image }}
           DIGEST: ${{ inputs.digest }}
+        # Whole-string matches, not grep: grep passes if any one line matches,
+        # so a multiline input could append its own reference= output line.
         run: |
-          if ! printf '%s' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::digest must be sha256: followed by 64 lowercase hex characters"
             exit 1
           fi
           # A colon after the last slash is a tag; an @ is a digest.
-          if ! printf '%s' "$IMAGE" | grep -Eq '^[a-z0-9][a-z0-9._/:-]*$' \
-            || printf '%s' "${IMAGE##*/}" | grep -q ':'; then
+          if [[ ! "$IMAGE" =~ ^[a-z0-9][a-z0-9._/:-]*$ ]] || [[ "${IMAGE##*/}" == *:* ]]; then
             echo "::error::image must be a reference without tag or digest"
             exit 1
           fi
