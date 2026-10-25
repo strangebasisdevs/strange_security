@@ -55,25 +55,49 @@ jobs:
 
       # Image version lives in .github/docker/trivy.Dockerfile, the single spot Dependabot updates.
       - name: Build Trivy image
+        id: build
         run: |
           docker build \
             --file .strange-security/.github/docker/trivy.Dockerfile \
             --tag trivy-scanner \
             .strange-security
 
-      - name: Run Trivy
+      # Unfiltered by severity: --severity also filters the secret scanner,
+      # and some built-in secret rules are below HIGH. Any secret fails.
+      - name: Run Trivy secret scan
         run: |
           docker run --rm \
             --volume "$PWD:/src" \
             --workdir /src \
             trivy-scanner \
-            fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+            fs --scanners secret \
             --skip-dirs .strange-security \
-            --format sarif --output /src/trivy-results.sarif --exit-code 1 /src
+            --format sarif --output /src/trivy-secret.sarif --exit-code 1 /src
 
-      - name: Upload SARIF results
+      # Runs even when the secret scan failed, so both reports are uploaded.
+      - name: Run Trivy vulnerability scan
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker run --rm \
+            --volume "$PWD:/src" \
+            --workdir /src \
+            trivy-scanner \
+            fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --skip-dirs .strange-security \
+            --format sarif --output /src/trivy-vuln.sarif --exit-code 1 /src
+
+      # Code scanning takes one SARIF run per category. Vulnerabilities keep
+      # the existing trivy category; secrets get their own.
+      - name: Upload secret scan SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
-          sarif_file: trivy-results.sarif
+          sarif_file: trivy-secret.sarif
+          category: trivy-secret
+
+      - name: Upload vulnerability scan SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: trivy-vuln.sarif
           category: trivy
