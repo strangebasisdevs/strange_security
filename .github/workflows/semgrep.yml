@@ -51,13 +51,13 @@ jobs:
           WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
         run: |
           test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
-          test -d .strange-security/.github/docker
+          test -d .strange-security/scanner-images
 
-      # Image version lives in .github/docker/semgrep.Dockerfile, the single spot Dependabot updates.
+      # Image version lives in scanner-images/semgrep.Dockerfile, the single spot Dependabot updates.
       - name: Build Semgrep image
         run: |
           docker build \
-            --file .strange-security/.github/docker/semgrep.Dockerfile \
+            --file .strange-security/scanner-images/semgrep.Dockerfile \
             --tag semgrep-scanner \
             .strange-security
 

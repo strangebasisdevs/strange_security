@@ -16,9 +16,12 @@ updates:
     cooldown:
       default-days: 7
 
-  # Tracks the semgrep/semgrep and aquasec/trivy pins in .github/docker/*.Dockerfile.
+  # Tracks the semgrep/semgrep and aquasec/trivy pins in scanner-images/*.Dockerfile.
+  # Keep this directory outside .github/: for the docker ecosystem Dependabot
+  # found the updates under /.github/docker, but create_pull_request returned
+  # 400 "invalid or unauthorized changes" (dependency_file_not_supported) on every run.
   - package-ecosystem: docker
-    directory: /.github/docker
+    directory: /scanner-images
     schedule:
       interval: weekly
       day: monday

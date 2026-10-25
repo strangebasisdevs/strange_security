@@ -51,14 +51,14 @@ jobs:
           WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
         run: |
           test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
-          test -d .strange-security/.github/docker
+          test -d .strange-security/scanner-images
 
-      # Image version lives in .github/docker/trivy.Dockerfile, the single spot Dependabot updates.
+      # Image version lives in scanner-images/trivy.Dockerfile, the single spot Dependabot updates.
       - name: Build Trivy image
         id: build
         run: |
           docker build \
-            --file .strange-security/.github/docker/trivy.Dockerfile \
+            --file .strange-security/scanner-images/trivy.Dockerfile \
             --tag trivy-scanner \
             .strange-security
 
