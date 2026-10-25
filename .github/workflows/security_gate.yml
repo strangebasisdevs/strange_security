@@ -12,6 +12,41 @@ permissions:
   security-events: write
 
 jobs:
+  # The jobs below call the shared workflows locally, where the caller and the
+  # called workflow share one repository, so a workflow that locates itself
+  # through the caller's github context still passes here and only breaks for
+  # other repositories. This job fails on that pattern instead.
+  contract:
+    name: Reusable workflow contract
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check how shared workflows locate themselves
+        run: |
+          status=0
+          for file in .github/workflows/*.yml; do
+            grep -q '^  workflow_call:' "$file" || continue
+            if grep -nE '^[^#]*github\.(workflow_ref|workflow_sha|job_workflow_sha)' "$file"; then
+              echo "::error file=$file::uses the caller's github.workflow_* context; use job.workflow_repository and job.workflow_sha"
+              status=1
+            fi
+            if grep -q '\.strange-security' "$file"; then
+              for key in 'job.workflow_repository' 'job.workflow_sha'; do
+                if ! grep -qF "\${{ $key }}" "$file"; then
+                  echo "::error file=$file::checks out .strange-security without \${{ $key }}"
+                  status=1
+                fi
+              done
+            fi
+          done
+          exit "$status"
+
   semgrep:
     name: Semgrep
     uses: ./.github/workflows/semgrep.yml
