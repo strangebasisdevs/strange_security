@@ -26,8 +26,12 @@ class CheckText(unittest.TestCase):
     def ok(self, text, ext=".c"):
         self.assertEqual(cs.check_text(text, ext), [])
 
-    def bad(self, text, count=1, ext=".c"):
-        self.assertEqual(len(cs.check_text(text, ext)), count, cs.check_text(text, ext))
+    def bad(self, text, count=1, ext=None):
+        # Without an explicit ext the text must fail in both a "#" language and
+        # a "//" language, so a "#" line cannot pass just because it is code in C.
+        for each in ((".c", ".py") if ext is None else (ext,)):
+            with self.subTest(ext=each):
+                self.assertEqual(len(cs.check_text(text, each)), count, cs.check_text(text, each))
 
     def test_valid_hash(self):
         self.ok(lines_of("# " + REASON, "run(cmd)  # %s: %s" % (K, RULE)), ".py")
@@ -190,6 +194,10 @@ class CheckText(unittest.TestCase):
     def test_star_reason_only_inside_block_comment(self):
         self.ok(lines_of("/*", " * " + REASON, " * more text here", "run(); // %s: %s" % (K, RULE)))
         self.bad(lines_of(" * " + REASON, "run(); // %s: %s" % (K, RULE)))
+
+    def test_star_line_in_block_needs_block_syntax(self):
+        # In .py "/*" is not a comment opener, so the " * " line is code, not a reason.
+        self.bad(lines_of("/*", " * reason text here", "run(cmd)  # %s: r" % K), ext=".py")
 
     def test_slash_markers_depend_on_extension(self):
         # Python floor division is not a reason comment.
