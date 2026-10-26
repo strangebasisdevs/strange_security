@@ -23,11 +23,11 @@ def lines_of(*lines):
 
 
 class CheckText(unittest.TestCase):
-    def ok(self, text):
-        self.assertEqual(cs.check_text(text), [])
+    def ok(self, text, ext=""):
+        self.assertEqual(cs.check_text(text, ext), [])
 
-    def bad(self, text, count=1):
-        self.assertEqual(len(cs.check_text(text)), count, cs.check_text(text))
+    def bad(self, text, count=1, ext=""):
+        self.assertEqual(len(cs.check_text(text, ext)), count, cs.check_text(text, ext))
 
     def test_valid_hash(self):
         self.ok(lines_of("# " + REASON, "run(cmd)  # %s: %s" % (K, RULE)))
@@ -36,12 +36,61 @@ class CheckText(unittest.TestCase):
         self.ok(lines_of("// " + REASON, "run(cmd); // %s: %s" % (K, RULE)))
 
     def test_valid_sql_and_lua(self):
-        self.ok(lines_of("-- " + REASON, "select 1 -- %s: %s" % (K, RULE)))
+        self.ok(lines_of("-- " + REASON, "select 1 -- %s: %s" % (K, RULE)), ".sql")
+        self.ok(lines_of("-- " + REASON, "x = 1 -- %s: %s" % (K, RULE)), ".lua")
 
     def test_valid_block_comments(self):
         self.ok(lines_of("/* " + REASON + " */", "run(cmd); /* %s: %s */" % (K, RULE)))
         self.ok(lines_of("/**", " * " + REASON, "run(cmd); /* %s: %s */" % (K, RULE)))
         self.ok(lines_of("<!-- " + REASON + " -->", "<x/> <!-- %s: %s -->" % (K, RULE)))
+
+    def test_ambiguous_markers_depend_on_extension(self):
+        cases = {
+            ";": (".ini", ".asm", ".el", ".lisp", ".clj"),
+            "%": (".tex", ".erl", ".m"),
+            "--": (".sql", ".lua", ".hs", ".ada"),
+        }
+        for marker, exts in cases.items():
+            text = lines_of(marker + " " + REASON, "code 1 %s %s: %s" % (marker, K, RULE))
+            for ext in exts:
+                with self.subTest(marker=marker, ext=ext):
+                    self.ok(text, ext)
+            for ext in ("", ".py", ".js", ".c", ".java", ".go"):
+                with self.subTest(marker=marker, ext=ext):
+                    self.bad(text, 1, ext)
+
+    def test_semicolon_line_in_js_is_code_not_reason(self):
+        self.bad(lines_of("; eval(userInput);", "run(cmd)  // %s: %s" % (K, RULE)), ext=".js")
+        self.bad(lines_of("; " + REASON, "run(cmd)  // %s: %s" % (K, RULE)), ext=".js")
+
+    def test_inline_block_comment_then_code_is_not_reason(self):
+        self.bad(lines_of("/* " + REASON + " */ eval(y)", "run(cmd); // %s: %s" % (K, RULE)))
+        self.bad(lines_of("<!-- " + REASON + " --> <script>x()</script>", "<x/> <!-- %s: %s -->" % (K, RULE)))
+        self.ok(lines_of("/* " + REASON + " */", "run(cmd); // %s: %s" % (K, RULE)))
+
+    def test_star_line_after_closed_block_is_code(self):
+        self.bad(lines_of("/* closed comment here */", " * " + REASON, "run(); // %s: %s" % (K, RULE)))
+        self.bad(lines_of("/*", " * " + REASON, " */", " * " + REASON, "run(); // %s: %s" % (K, RULE)))
+        self.bad(lines_of("/*", " * " + REASON + " */", " * " + REASON, "run(); // %s: %s" % (K, RULE)))
+
+    def test_only_newline_splits_lines(self):
+        for sep in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(sep=repr(sep)):
+                text = lines_of("# " + REASON, "run(cmd)  # %s: a.b%sc.d" % (K, sep))
+                self.bad(text)
+
+    def test_control_chars_on_suppression_line_fail(self):
+        for ch in ("\x00", "\x01", "\x08", "\x0b", "\x0c", "\x0e", "\x1f", "\x7f", "\x85", "\u2028", "\u2029"):
+            with self.subTest(ch=repr(ch)):
+                self.bad(lines_of("# " + REASON, "run(cmd)%s  # %s: %s" % (ch, K, RULE)))
+
+    def test_control_chars_on_reason_line_fail(self):
+        for ch in ("\x00", "\x0b", "\x0c", "\x1c", "\x7f", "\x85", "\u2028", "\u2029"):
+            with self.subTest(ch=repr(ch)):
+                self.bad(lines_of("# " + REASON + ch + "more", "run(cmd)  # %s: %s" % (K, RULE)))
+
+    def test_tab_and_cr_still_fine(self):
+        self.ok("# %s\r\nrun(cmd)\t# %s: %s\r\n" % (REASON, K, RULE))
 
     def test_bare_fails(self):
         self.bad(lines_of("# " + REASON, "run(cmd)  # " + K))

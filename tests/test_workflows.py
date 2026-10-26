@@ -13,12 +13,30 @@ def read(name):
         return handle.read()
 
 
+def gate_pattern():
+    """The ERE the security gate's contract job uses to spot reusable workflows."""
+    match = re.search(r"grep -qE '([^']*workflow_call[^']*)' \"\$file\" \|\| continue", read("security_gate.yml"))
+    assert match, "contract job no longer greps for workflow_call"
+    return match.group(1)
+
+
+def is_reusable(text):
+    return bool(re.search(gate_pattern(), text, re.M))
+
+
 def reusable():
     return sorted(
         os.path.basename(p)
         for p in glob.glob(os.path.join(WORKFLOWS, "*.yml"))
-        if re.search(r"^on:\s*\n(?:[ \t]+.*\n|\n)*?[ \t]+workflow_call:", read(os.path.basename(p)), re.M)
+        if is_reusable(read(os.path.basename(p)))
     )
+
+
+def step(text, name):
+    """The text of one workflow step, from its name line to the next step."""
+    start = text.index("- name: " + name)
+    end = text.find("\n      - name:", start + 1)
+    return text[start:] if end < 0 else text[start:end]
 
 
 class Workflows(unittest.TestCase):
@@ -35,6 +53,47 @@ class Workflows(unittest.TestCase):
         self.assertIn("if: always()", text[check:text.index("run:", check)])
         upload = text.index("name: Upload SARIF results")
         self.assertIn("if: always()", text[upload:text.index("uses:", upload)])
+
+    def test_semgrep_checker_step_is_not_continue_on_error(self):
+        text = read("semgrep.yml")
+        self.assertNotIn("continue-on-error", text)
+        self.assertNotIn("continue-on-error", step(text, "Check Semgrep suppressions"))
+
+    def test_semgrep_sarif_is_outside_the_workspace(self):
+        text = read("semgrep.yml")
+        run = step(text, "Run Semgrep")
+        self.assertIn('--volume "$RUNNER_TEMP:/out"', run)
+        self.assertIn("--output /out/semgrep.sarif", run)
+        self.assertNotRegex(run, r"--output\s+/src")
+        upload = step(text, "Upload SARIF results")
+        self.assertIn("sarif_file: ${{ runner.temp }}/semgrep.sarif", upload)
+        self.assertNotRegex(text, r"sarif_file:\s*(\./)?semgrep\.sarif")
+
+    def test_registry_login_step_is_conditional(self):
+        login = step(read("trivy-image.yml"), "Log in to GitHub Container Registry")
+        self.assertIn("if: ${{ inputs.registry-login }}", login[:login.index("run:")])
+
+    def test_reusable_detection_recognises_every_form(self):
+        forms = {
+            "block": "name: X\non:\n  workflow_call:\n    inputs: {}\n",
+            "block with other triggers": "on:\n  push:\n  workflow_call:\n",
+            "inline": "name: X\non: workflow_call\njobs: {}\n",
+            "list": "on: [push, workflow_call]\n",
+            "list first": "on: [workflow_call, push]\n",
+            "list only": "on: [workflow_call]\n",
+        }
+        for label, text in forms.items():
+            with self.subTest(form=label):
+                self.assertTrue(is_reusable(text))
+        for label, text in {
+            "push": "on:\n  push:\n",
+            "inline push": "on: push\n",
+            "list push": "on: [push, pull_request]\n",
+            "comment": "# on: workflow_call\non: push\n",
+            "similar name": "on: [my_workflow_call]\n",
+        }.items():
+            with self.subTest(form=label):
+                self.assertFalse(is_reusable(text))
 
     def test_gate_calls_every_reusable_workflow(self):
         gate = read("security_gate.yml")

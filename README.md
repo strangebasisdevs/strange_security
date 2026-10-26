@@ -191,7 +191,10 @@ pull request. They cover:
 
 - the image and digest validation in `trivy-image.yml`, by extracting the real
   step and running it under bash, including multiline inputs;
-- the suppression check in `scripts/check_suppressions.py`.
+- the suppression check in `scripts/check_suppressions.py`;
+- the structure of the workflow files in `tests/test_workflows.py` (checker
+  step ordering, SARIF kept outside the workspace, conditional registry login,
+  reusable-workflow detection, digest-pinned gate image).
 
 ## Maintenance
 
@@ -212,7 +215,7 @@ workflow share one repository. That hides any mix-up between the two, so its
 `github.workflow_*` context or checks out `.strange-security` without
 `job.workflow_repository` and `job.workflow_sha`.
 
-The gate also calls `trivy-image.yml` on the public Trivy scanner image pinned
-in `scanner-images/trivy.Dockerfile`, so every reusable workflow runs on every
-pull request. Update that image and digest in `security_gate.yml` together with
-the Dockerfile.
+The gate also calls `trivy-image.yml` on the digest-pinned public image
+`gcr.io/distroless/static-debian12`, so every reusable workflow runs on every
+pull request. That image is not tied to `scanner-images/trivy.Dockerfile`;
+refresh its digest in `security_gate.yml` by hand.
