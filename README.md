@@ -191,10 +191,13 @@ pull request. They cover:
 
 - the image and digest validation in `trivy-image.yml`, by extracting the real
   step and running it under bash, including multiline inputs;
-- the suppression check in `scripts/check_suppressions.py`;
+- the suppression check in `scripts/check_suppressions.py`, including which
+  comment markers count for which file extensions;
 - the structure of the workflow files in `tests/test_workflows.py` (checker
-  step ordering, SARIF kept outside the workspace, conditional registry login,
-  reusable-workflow detection, digest-pinned gate image).
+  step ordering, SARIF written to a dedicated directory outside the workspace
+  with the source mounted read-only, conditional registry login,
+  reusable-workflow detection checked per line and against a real `grep -E`
+  when one is installed, digest-pinned gate image).
 
 ## Maintenance
 

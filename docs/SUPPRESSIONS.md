@@ -38,10 +38,21 @@ Rules:
 `semgrep.yml` runs `scripts/check_suppressions.py` on the caller's code and
 fails on a bare, short or uppercase suppression, one with no rule id, one naming
 several rules, two keywords on one line, a standalone suppression line, or one
-without a reason comment on the line directly above. It understands `#`,
-`//`, `--`, `;`, `%`, `/* */` and `<!-- -->` comments. It skips Markdown files
-and the `.strange-security` checkout. It checks the form only; whether the
-reason is true is the reviewer's call.
+without a reason comment on the line directly above. It understands `//`,
+`/* */` and `<!-- -->` comments in every file, and the markers that are also
+code elsewhere only for the listed file types:
+
+- `#` counts only in shell, Python, Ruby, Perl, PHP, R, YAML, TOML, conf, cfg
+  and ini files, Terraform/HCL, PowerShell and a few similar types, in
+  `Dockerfile` and `Makefile`, and in files with no extension. In C-family and
+  JS/TS files `#` is a preprocessor line or a private field, not a comment.
+- `;` counts only in `.ini`, assembly, Lisp, Scheme and Clojure files.
+- `%` counts only in `.tex`, `.sty`, `.erl`, `.hrl` and `.m` files.
+- `--` counts only in `.sql`, `.lua`, `.hs` and Ada files.
+
+It skips Markdown (`.md`, `.markdown`) and reStructuredText (`.rst`) files, and
+the `.strange-security` checkout. It checks the form only; whether the reason
+is true is the reviewer's call.
 
 ## Trivy
 

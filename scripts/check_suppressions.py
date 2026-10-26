@@ -10,7 +10,10 @@ directly above it must be a comment giving the reason:
     subprocess.run(cmd)  # <marker>: python.lang.security.audit.dangerous-subprocess-use-audit
 
 where <marker> is the Semgrep suppression keyword (spelled out in the policy).
-Comment syntaxes: #  //  /* */  <!-- -->  everywhere; ";" only in .ini/.asm/.el/
+Comment syntaxes: //  /* */  <!-- -->  everywhere; "#" only in shell/Python/
+Ruby/Perl/YAML/TOML/R/conf/ini files, Dockerfile, Makefile and extensionless
+files (not C-family or JS/TS, where it is a preprocessor line or a private
+field); ";" only in .ini/.asm/.el/
 .lisp/.clj and similar, "%" only in .tex/.erl/.m, "--" only in .sql/.lua/.hs/
 .ada. Lines split on newline only, as Semgrep reads them; control characters on
 a suppression or reason line are rejected.
@@ -39,7 +42,15 @@ MIN_REASON_CHARS = 8
 
 # Always comment markers. The ambiguous ones are decided by file extension:
 # ';' is code in C-like languages, '%' is an operator, '--' is a decrement.
-BASE_MARKERS = ("#", "//", "/*", "<!--")
+BASE_MARKERS = ("//", "/*", "<!--")
+# '#' is a comment only in these files. In C-family code it starts a
+# preprocessor line, and in JS/TS it marks a private field, so it is not one.
+# Extensionless files (shell scripts, dotfiles) and Dockerfile/Makefile count.
+HASH_EXTS = (
+    ".py", ".pyi", ".sh", ".bash", ".zsh", ".rb", ".pl", ".pm", ".r", ".yml", ".yaml", ".toml",
+    ".conf", ".cfg", ".ini", ".tf", ".hcl", ".ps1", ".mk", ".cmake", ".jl", ".ex", ".exs",
+    ".nix", ".properties", ".php", ".dockerfile", ".makefile", "dockerfile", "makefile", "",
+)
 EXTRA_MARKERS = {
     ";": (".ini", ".asm", ".s", ".nasm", ".el", ".lisp", ".lsp", ".scm", ".clj", ".cljs", ".cljc", ".edn"),
     "%": (".tex", ".sty", ".erl", ".hrl", ".m"),
@@ -49,7 +60,7 @@ EXTRA_MARKERS = {
 # Physical lines as Semgrep reads them: split on "\n" only. These characters
 # would let one line hide a second suppression or reason from a reader that
 # splits differently, so they are rejected on suppression and reason lines.
-CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85  ]")
+CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]")
 STAR_LINE = re.compile(r"^[ \t]*\*(?!/)")
 BLOCK_OPEN = re.compile(r"^[ \t]*/\*")
 COMMENT_END = re.compile(r"[ \t]*(?:\*+/|-->)[ \t]*$")
@@ -60,7 +71,7 @@ class Syntax:
 
     def __init__(self, ext=""):
         ext = ext.lower()
-        markers = list(BASE_MARKERS) + [m for m, exts in EXTRA_MARKERS.items() if ext in exts]
+        markers = list(BASE_MARKERS) + (["#"] if ext in HASH_EXTS else []) + [m for m, exts in EXTRA_MARKERS.items() if ext in exts]
         start = "(?:" + "|".join(re.escape(m) for m in markers) + ")"
         # Code, then one inline comment naming one rule, lowercase keyword,
         # nothing after it except a closing comment marker.
@@ -69,7 +80,7 @@ class Syntax:
             + r"[ \t]*(?:\*/|-->)?[ \t]*$"
         )
         self.comment_line = re.compile(r"^[ \t]*" + start)
-        strip = [r"#+", r"//+", r"/\*+", r"\*+", "<!--"]
+        strip = [r"//+", r"/\*+", r"\*+", "<!--"] + ([r"#+"] if "#" in markers else [])
         strip += [re.escape(m) + "+" for m in markers if m in (";", "%", "--")]
         self.strip = re.compile(r"^[ \t]*(?:" + "|".join(strip) + r")[ \t]*")
 
@@ -102,7 +113,7 @@ def reason_of(lines, i, syntax):
     if DETECT.search(line) or CONTROL.search(line):
         return None
     if STAR_LINE.match(line):
-        if not in_block_comment(lines, i):
+        if not in_block_comment(lines, i) or closes_with_code(line, "*", "*/"):
             return None
     elif not syntax.comment_line.match(line):
         return None
@@ -171,6 +182,13 @@ def read_text(path):
     return data.decode("utf-8", errors="replace")
 
 
+def syntax_key(path):
+    """Extension that picks the comment syntax; the file name when it has none."""
+    name = os.path.basename(path)
+    ext = os.path.splitext(name)[1]
+    return ext if ext else ("" if name.startswith(".") else name.lower())
+
+
 def check_tree(root):
     """Return a list of (path, line_number, message) under root."""
     found = []
@@ -178,7 +196,7 @@ def check_tree(root):
         text = read_text(path)
         if text is None or not DETECT.search(text):
             continue
-        for number, message in check_text(text, os.path.splitext(path)[1]):
+        for number, message in check_text(text, syntax_key(path)):
             found.append((os.path.relpath(path, root).replace(os.sep, "/"), number, message))
     return found
 

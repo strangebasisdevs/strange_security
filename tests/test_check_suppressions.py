@@ -68,6 +68,26 @@ class CheckText(unittest.TestCase):
         self.bad(lines_of("<!-- " + REASON + " --> <script>x()</script>", "<x/> <!-- %s: %s -->" % (K, RULE)))
         self.ok(lines_of("/* " + REASON + " */", "run(cmd); // %s: %s" % (K, RULE)))
 
+    def test_star_continuation_closing_then_code_is_not_reason(self):
+        self.bad(lines_of("/*", " * more text " + REASON + " */ eval(1)", "run(); // %s: %s" % (K, RULE)))
+        self.ok(lines_of("/*", " * " + REASON + " */", "run(); // %s: %s" % (K, RULE)))
+
+    def test_hash_is_a_comment_only_in_hash_languages(self):
+        for ext in (".py", ".sh", ".bash", ".rb", ".pl", ".yml", ".yaml", ".toml", ".r", ".conf", ".cfg",
+                    ".ini", ".dockerfile", "dockerfile", "makefile", ""):
+            with self.subTest(ext=ext):
+                self.ok(lines_of("# " + REASON, "run(cmd)  # %s: %s" % (K, RULE)), ext)
+
+    def test_hash_is_not_a_comment_in_c_family_or_js(self):
+        reasons = ["#define " + REASON.replace(" ", "_"), "#include <stdio.h> " + REASON, "#if defined(X) " + REASON,
+                   "#pragma once " + REASON, "#x = " + REASON, "# " + REASON]
+        for ext in (".c", ".h", ".cpp", ".hpp", ".cc", ".js", ".ts", ".jsx", ".tsx", ".java", ".go"):
+            for reason in reasons:
+                with self.subTest(ext=ext, reason=reason):
+                    self.bad(lines_of(reason, "run(cmd); // %s: %s" % (K, RULE)), ext=ext)
+            with self.subTest(ext=ext, form="inline hash marker"):
+                self.bad(lines_of("// " + REASON, "run(cmd)  # %s: %s" % (K, RULE)), ext=ext)
+
     def test_star_line_after_closed_block_is_code(self):
         self.bad(lines_of("/* closed comment here */", " * " + REASON, "run(); // %s: %s" % (K, RULE)))
         self.bad(lines_of("/*", " * " + REASON, " */", " * " + REASON, "run(); // %s: %s" % (K, RULE)))
@@ -213,6 +233,17 @@ class CheckTree(unittest.TestCase):
     def test_skips_markdown_and_binary(self):
         root = self.make({"README.md": self.BAD, "blob.bin": b"\0\0" + self.BAD.encode()})
         self.assertEqual(cs.check_tree(root), [])
+
+    def test_real_extension_reaches_check_text(self):
+        suppression = "x(); // %s: %s" % (K, RULE)
+        root = self.make({
+            "a.js": lines_of("-- reason text here", suppression),
+            "b.js": lines_of("; eval(x)", suppression),
+            "a.sql": lines_of("-- reason text here", "select 1 -- %s: %s" % (K, RULE)),
+            "Dockerfile": lines_of("# reason text here", "RUN x # %s: %s" % (K, RULE)),
+            "tool.c": lines_of("# reason text here", suppression),
+        })
+        self.assertEqual(sorted(p for p, _, _ in cs.check_tree(root)), ["a.js", "b.js", "tool.c"])
 
     def test_valid_file_passes(self):
         root = self.make({"a.py": "# %s\nrun()  # %s: %s\n" % (REASON, K, RULE)})

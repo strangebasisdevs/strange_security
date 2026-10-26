@@ -2,6 +2,9 @@
 import glob
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -21,7 +24,28 @@ def gate_pattern():
 
 
 def is_reusable(text):
-    return bool(re.search(gate_pattern(), text, re.M))
+    """Apply the pattern the way grep -E does: to one line at a time."""
+    pattern = re.compile(gate_pattern())
+    return any(pattern.search(line) for line in text.split("\n"))
+
+
+def find_grep():
+    found = shutil.which("grep")
+    if found:
+        return found
+    for candidate in ("C:/Program Files/Git/usr/bin/grep.exe", "C:/Program Files (x86)/Git/usr/bin/grep.exe"):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def grep_reusable(text):
+    """Run the real 'grep -qE <pattern from security_gate.yml>' on text."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "workflow.yml")
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        return subprocess.run([find_grep(), "-qE", gate_pattern(), path], check=False).returncode == 0
 
 
 def reusable():
@@ -62,11 +86,14 @@ class Workflows(unittest.TestCase):
     def test_semgrep_sarif_is_outside_the_workspace(self):
         text = read("semgrep.yml")
         run = step(text, "Run Semgrep")
-        self.assertIn('--volume "$RUNNER_TEMP:/out"', run)
+        self.assertIn('mkdir -p "$RUNNER_TEMP/semgrep"', run)
+        self.assertIn('--volume "$RUNNER_TEMP/semgrep:/out"', run)
+        self.assertNotIn('--volume "$RUNNER_TEMP:/out"', run)
+        self.assertIn('--volume "$PWD:/src:ro"', run)
         self.assertIn("--output /out/semgrep.sarif", run)
         self.assertNotRegex(run, r"--output\s+/src")
         upload = step(text, "Upload SARIF results")
-        self.assertIn("sarif_file: ${{ runner.temp }}/semgrep.sarif", upload)
+        self.assertIn("sarif_file: ${{ runner.temp }}/semgrep/semgrep.sarif", upload)
         self.assertNotRegex(text, r"sarif_file:\s*(\./)?semgrep\.sarif")
 
     def test_registry_login_step_is_conditional(self):
@@ -94,6 +121,32 @@ class Workflows(unittest.TestCase):
         }.items():
             with self.subTest(form=label):
                 self.assertFalse(is_reusable(text))
+
+    def test_gate_pattern_is_matched_per_line(self):
+        # [^#]* must not run across a newline: a comment on one line followed
+        # by workflow_call on the next is not the inline form.
+        self.assertFalse(is_reusable("on: push # x\nname: workflow_call\n"))
+        self.assertFalse(is_reusable("on:\n  push:\nname: a workflow_call b\n"))
+
+    @unittest.skipUnless(find_grep(), "grep is not available")
+    def test_real_grep_agrees_with_the_emulation(self):
+        texts = {
+            "block": "on:\n  workflow_call:\n",
+            "inline": "on: workflow_call\n",
+            "list": "on: [push, workflow_call]\n",
+            "push": "on:\n  push:\n",
+            "comment": "# on: workflow_call\non: push\n",
+            "similar": "on: [my_workflow_call]\n",
+            "newline spill": "on: push # x\nname: workflow_call\n",
+        }
+        for name in sorted(glob.glob(os.path.join(WORKFLOWS, "*.yml"))):
+            texts[os.path.basename(name)] = read(os.path.basename(name))
+        for label, text in texts.items():
+            with self.subTest(text=label):
+                self.assertEqual(grep_reusable(text), is_reusable(text))
+        self.assertTrue(grep_reusable(texts["block"]))
+        self.assertTrue(grep_reusable(texts["semgrep.yml"]))
+        self.assertFalse(grep_reusable(texts["security_gate.yml"]))
 
     def test_gate_calls_every_reusable_workflow(self):
         gate = read("security_gate.yml")
