@@ -127,6 +127,16 @@ def reason_of(lines, i, syntax):
     return text.strip()
 
 
+def previous_line_form(line):
+    """Semgrep's previous-line rule: nothing but punctuation and spaces before the keyword.
+
+    Mirrors the leading pattern of Semgrep's own ignore matcher. Such a line
+    also covers the next line, whatever comment marker (or none) it uses.
+    """
+    first = DETECT.search(line)
+    return first is not None and not re.search("[A-Za-z0-9]", line[:first.start()])
+
+
 def check_text(text, ext=""):
     """Return a list of (line_number, message) for one file's text."""
     problems = []
@@ -140,7 +150,7 @@ def check_text(text, ext=""):
         if CONTROL.search(line):
             problems.append((number, "control character on a suppression line; remove it"))
             continue
-        standalone = syntax.comment_line.match(line) or STAR_LINE.match(line)
+        standalone = syntax.comment_line.match(line) or STAR_LINE.match(line) or previous_line_form(line)
         if len(found) != 1 or standalone or not syntax.valid.search(line):
             problems.append(
                 (number, "bare or malformed suppression; use code, then one lowercase inline comment naming exactly one rule id")
@@ -186,7 +196,10 @@ def syntax_key(path):
     """Extension that picks the comment syntax; the file name when it has none."""
     name = os.path.basename(path)
     ext = os.path.splitext(name)[1]
-    return ext if ext else ("" if name.startswith(".") else name.lower())
+    if ext:
+        return ext
+    lowered = name.lower()
+    return lowered if lowered in ("dockerfile", "makefile") else ""
 
 
 def check_tree(root):

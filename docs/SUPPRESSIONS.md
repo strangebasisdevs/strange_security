@@ -19,7 +19,9 @@ Rules:
 - The comment is exactly lowercase `nosemgrep: <rule-id>`, inline after code on
   the same line, never bare. Semgrep also honours the short `nosem` form in any
   case, so those are rejected too, as is a standalone comment line holding only
-  the suppression (Semgrep's previous-line form). A bare `nosemgrep` hides
+  the suppression (Semgrep's previous-line form). So is any line with no letter
+  or digit before the keyword, such as `# // ...`, `} // ...` or `*/ // ...`:
+  Semgrep also reads those as covering the next line. A bare `nosemgrep` hides
   every rule on the line, including ones added later.
 - One line, one rule. A line that needs two suppressions is a reason to change
   the code. Do not list several rule ids in one comment.

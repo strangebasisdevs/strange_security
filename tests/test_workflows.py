@@ -108,6 +108,9 @@ class Workflows(unittest.TestCase):
             "list": "on: [push, workflow_call]\n",
             "list first": "on: [workflow_call, push]\n",
             "list only": "on: [workflow_call]\n",
+            "double-quoted key": "\"on\": workflow_call\n",
+            "single-quoted key": "'on': [workflow_call]\n",
+            "quoted key block": "\"on\":\n  workflow_call:\n",
         }
         for label, text in forms.items():
             with self.subTest(form=label):
@@ -118,6 +121,8 @@ class Workflows(unittest.TestCase):
             "list push": "on: [push, pull_request]\n",
             "comment": "# on: workflow_call\non: push\n",
             "similar name": "on: [my_workflow_call]\n",
+            "other key ending in on": "iron: workflow_call\n",
+            "quoted comment": "# 'on': workflow_call\n",
         }.items():
             with self.subTest(form=label):
                 self.assertFalse(is_reusable(text))
@@ -134,6 +139,8 @@ class Workflows(unittest.TestCase):
             "block": "on:\n  workflow_call:\n",
             "inline": "on: workflow_call\n",
             "list": "on: [push, workflow_call]\n",
+            "quoted": "'on': [workflow_call]\n",
+            "quoted double": "\"on\": workflow_call\n",
             "push": "on:\n  push:\n",
             "comment": "# on: workflow_call\non: push\n",
             "similar": "on: [my_workflow_call]\n",

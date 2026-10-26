@@ -31,7 +31,7 @@ jobs:
         run: |
           status=0
           for file in .github/workflows/*.yml; do
-            grep -qE '^(on:[^#]*[^A-Za-z_]workflow_call([^A-Za-z_]|$)|[ ]+workflow_call:)' "$file" || continue
+            grep -qE '^([^A-Za-z_ #:]?on[^A-Za-z_ #:]?:[^#]*[^A-Za-z_]workflow_call([^A-Za-z_]|$)|[ ]+workflow_call:)' "$file" || continue
             if grep -nE '^[^#]*github\.(workflow_ref|workflow_sha|job_workflow_sha)' "$file"; then
               echo "::error file=$file::uses the caller's github.workflow_* context; use job.workflow_repository and job.workflow_sha"
               status=1

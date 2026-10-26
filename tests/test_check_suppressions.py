@@ -177,6 +177,16 @@ class CheckText(unittest.TestCase):
         self.bad(lines_of("# " + REASON, "// %s: %s" % (K, RULE), "a()"))
         self.bad(lines_of("# " + REASON, "## %s: %s" % (K, RULE)))
 
+    def test_punctuation_only_prefix_is_previous_line_form(self):
+        # Semgrep treats any line with no letter or digit before the keyword as
+        # a suppression of the next line too, whatever markers precede it.
+        for ext in (".c", ".js", ""):
+            for prefix in ("# // ", "; // ", "} // ", "*/ // ", ");  // "):
+                with self.subTest(ext=ext, prefix=prefix):
+                    line = prefix + "%s: %s" % (K, RULE)
+                    self.bad(lines_of("// " + REASON, line, "a()"), ext=ext)
+        self.ok(lines_of("// " + REASON, "a(); // %s: %s" % (K, RULE)), ext=".c")
+
     def test_star_reason_only_inside_block_comment(self):
         self.ok(lines_of("/*", " * " + REASON, " * more text here", "run(); // %s: %s" % (K, RULE)))
         self.bad(lines_of(" * " + REASON, "run(); // %s: %s" % (K, RULE)))
@@ -244,6 +254,16 @@ class CheckTree(unittest.TestCase):
             "tool.c": lines_of("# reason text here", suppression),
         })
         self.assertEqual(sorted(p for p, _, _ in cs.check_tree(root)), ["a.js", "b.js", "tool.c"])
+
+    def test_extensionless_file_gets_hash_comments(self):
+        good = lines_of("# " + REASON, "run x  # %s: %s" % (K, RULE))
+        bad = lines_of("# " + REASON, "# // %s: %s" % (K, RULE), "run x")
+        root = self.make({"deploy": good, "bin/other": bad, ".envrc": good})
+        self.assertEqual(sorted(p for p, _, _ in cs.check_tree(root)), ["bin/other"])
+        self.assertEqual(cs.syntax_key("a/deploy"), "")
+        self.assertEqual(cs.syntax_key("a/.bashrc"), "")
+        self.assertEqual(cs.syntax_key("a/Dockerfile"), "dockerfile")
+        self.assertEqual(cs.syntax_key("a/x.PY"), ".PY")
 
     def test_valid_file_passes(self):
         root = self.make({"a.py": "# %s\nrun()  # %s: %s\n" % (REASON, K, RULE)})
