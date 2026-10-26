@@ -108,6 +108,11 @@ class ValidateImageReference(unittest.TestCase):
             with self.subTest(image=image):
                 self.rejects(image)
 
+    def test_rejects_at_sign_without_colon(self):
+        for image in ("aquasec/trivy@abc", "app@", "ghcr.io/org/app@sha256", "@app"):
+            with self.subTest(image=image):
+                self.rejects(image)
+
     def test_rejects_bad_image_characters(self):
         for image in ("", "-app", "/app", ".app", "App", "ghcr.io/Org/app", "app name",
                       "app;id", "app$" + "(id)", "app" + BACKTICK + "id" + BACKTICK,

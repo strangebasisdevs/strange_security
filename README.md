@@ -105,8 +105,11 @@ The job is named `Trivy image scan`. The workflow scans exactly
 `digest` that is not `sha256:` plus 64 hex characters. Public images
 need no login. For a private image pass `registry-login: true`: the workflow
 then runs `docker login ghcr.io` as `github.actor` with the caller's
-`GITHUB_TOKEN` (through stdin, not a third-party action), so the caller must
-also grant `packages: read`; no secrets are passed. That covers private images
+`GITHUB_TOKEN` (through stdin, not a third-party action); no secrets are
+passed. Caveat: `trivy-image.yml` still requests `packages: read` at the top
+level of the workflow, whatever `registry-login` is, so every caller must grant
+`packages: read` on the calling job, public image or not, or GitHub rejects the
+call. That will be narrowed in Phase A step 2. Login covers private images
 in the same organisation, provided the calling repository has read access to
 the package.
 

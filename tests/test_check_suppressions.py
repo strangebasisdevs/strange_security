@@ -13,6 +13,7 @@ cs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cs)
 
 K = "no" + "semgrep"  # keep the keyword out of this file
+SHORT = "no" + "sem"
 RULE = "python.lang.security.audit.dangerous-subprocess-use-audit"
 REASON = "argument list, no shell, fixed binary path, validated inputs, timeout"
 
@@ -39,7 +40,7 @@ class CheckText(unittest.TestCase):
 
     def test_valid_block_comments(self):
         self.ok(lines_of("/* " + REASON + " */", "run(cmd); /* %s: %s */" % (K, RULE)))
-        self.ok(lines_of(" * " + REASON, "run(cmd); /* %s: %s */" % (K, RULE)))
+        self.ok(lines_of("/**", " * " + REASON, "run(cmd); /* %s: %s */" % (K, RULE)))
         self.ok(lines_of("<!-- " + REASON + " -->", "<x/> <!-- %s: %s -->" % (K, RULE)))
 
     def test_bare_fails(self):
@@ -77,6 +78,39 @@ class CheckText(unittest.TestCase):
             "b()  # %s: %s" % (K, RULE),
         )
         self.bad(text)
+
+    def test_reason_line_itself_a_suppression_fails(self):
+        # Previously surviving mutation: the line above is a suppression comment.
+        self.bad(lines_of("# %s: %s" % (K, RULE), "a()  # %s: %s" % (K, RULE)), 2)
+        self.bad(lines_of("// %s: %s %s" % (K, RULE, REASON), "a()  // %s: %s" % (K, RULE)), 2)
+
+    def test_code_line_above_is_not_a_reason(self):
+        self.bad(lines_of("x = call_something_long_enough()", "a()  # %s: %s" % (K, RULE)))
+        self.bad(lines_of("*ptr = value_long_enough;", "a(); // %s: %s" % (K, RULE)))
+        self.bad(lines_of("  * value_long_enough = 1;", "a(); // %s: %s" % (K, RULE)))
+
+    def test_comma_list_fails(self):
+        self.bad(lines_of("# " + REASON, "a()  # %s: a.b,c.d" % K))
+        self.bad(lines_of("# " + REASON, "a()  # %s: a.b ,c.d" % K))
+
+    def test_short_and_uppercase_forms_fail(self):
+        for word in (SHORT, SHORT.upper(), K.upper(), K.capitalize(), SHORT + "grep"[:2]):
+            with self.subTest(word=word):
+                self.bad(lines_of("# " + REASON, "a()  # %s: %s" % (word, RULE)))
+        self.bad(lines_of("# " + REASON, "a()  # " + SHORT))
+
+    def test_two_keywords_on_one_line_fail(self):
+        self.bad(lines_of("# " + REASON, "a()  # %s: a.b # %s: c.d" % (K, K)))
+        self.bad(lines_of("# " + REASON, "a()  # %s: a.b  # %s" % (K, SHORT)))
+
+    def test_standalone_previous_line_form_fails(self):
+        self.bad(lines_of("# " + REASON, "# %s: %s" % (K, RULE), "a()"))
+        self.bad(lines_of("# " + REASON, "// %s: %s" % (K, RULE), "a()"))
+        self.bad(lines_of("# " + REASON, "## %s: %s" % (K, RULE)))
+
+    def test_star_reason_only_inside_block_comment(self):
+        self.ok(lines_of("/*", " * " + REASON, " * more text here", "run(); // %s: %s" % (K, RULE)))
+        self.bad(lines_of(" * " + REASON, "run(); // %s: %s" % (K, RULE)))
 
     def test_two_suppressions_each_with_reason(self):
         self.ok(lines_of(

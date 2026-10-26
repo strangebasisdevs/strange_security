@@ -20,8 +20,11 @@ import os
 import re
 import sys
 
-# Spelled in two parts so this file does not contain the keyword itself.
+# Spelled in parts so this file does not contain the keyword itself.
 KEYWORD = "no" + "semgrep"
+# Detect it the way Semgrep does: the long or short spelling, any case. A line
+# Semgrep would honour but the policy form does not match is reported.
+DETECT = re.compile("no" + "sem(?:grep)?", re.IGNORECASE)
 
 SKIP_DIRS_ANYWHERE = {".git"}
 SKIP_DIRS_TOP = {".strange-security"}
@@ -30,20 +33,38 @@ MAX_BYTES = 2 * 1024 * 1024
 
 COMMENT_START = r"(?:#|//|--|;|%|/\*|<!--)"
 RULE_ID = r"[A-Za-z0-9_][A-Za-z0-9_.\-]*"
-# One comment, one rule, nothing after it (except a closing comment marker).
+# Code, then one inline comment naming one rule, lowercase keyword, nothing
+# after it except a closing comment marker.
 VALID = re.compile(
-    COMMENT_START + r"[ \t]*" + KEYWORD + r":[ \t]*" + RULE_ID + r"[ \t]*(?:\*/|-->)?[ \t]*$"
+    r"^[ \t]*\S[^\n]*?" + COMMENT_START + r"[ \t]*" + KEYWORD + r":[ \t]*" + RULE_ID
+    + r"[ \t]*(?:\*/|-->)?[ \t]*$"
 )
-# A line whose first non-blank text is a comment marker.
-COMMENT_LINE = re.compile(r"^[ \t]*(?:#|//|--|;|%|/\*|\*|<!--)")
+# A line whose first non-blank text is a comment marker (not a '*' continuation).
+COMMENT_LINE = re.compile(r"^[ \t]*(?:#|//|--|;|%|/\*|<!--)")
+STAR_LINE = re.compile(r"^[ \t]*\*(?!/)")
+BLOCK_OPEN = re.compile(r"^[ \t]*/\*")
 COMMENT_STRIP = re.compile(r"^[ \t]*(?:#+|//+|--+|;+|%+|/\*+|\*+|<!--)[ \t]*")
 COMMENT_END = re.compile(r"[ \t]*(?:\*+/|-->)[ \t]*$")
 MIN_REASON_CHARS = 8
 
 
-def reason_of(line):
-    """Return the reason text if line is a comment line, else None."""
-    if not COMMENT_LINE.match(line) or KEYWORD in line:
+def in_block_comment(lines, i):
+    """True if lines[i], which starts with '*', continues an open /* comment."""
+    j = i - 1
+    while j >= 0 and STAR_LINE.match(lines[j]):
+        j -= 1
+    return j >= 0 and bool(BLOCK_OPEN.match(lines[j])) and "*/" not in lines[j][lines[j].index("/*") + 2:]
+
+
+def reason_of(lines, i):
+    """Return the reason text if lines[i] is a comment line, else None."""
+    line = lines[i]
+    if DETECT.search(line):
+        return None
+    if STAR_LINE.match(line):
+        if not in_block_comment(lines, i):
+            return None
+    elif not COMMENT_LINE.match(line):
         return None
     text = COMMENT_END.sub("", COMMENT_STRIP.sub("", line, count=1))
     return text.strip()
@@ -54,15 +75,17 @@ def check_text(text):
     problems = []
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        if KEYWORD not in line:
+        found = DETECT.findall(line)
+        if not found:
             continue
         number = i + 1
-        if not VALID.search(line):
+        standalone = COMMENT_LINE.match(line) or STAR_LINE.match(line)
+        if len(found) != 1 or standalone or not VALID.search(line):
             problems.append(
-                (number, "bare or malformed suppression; use one comment naming exactly one rule id")
+                (number, "bare or malformed suppression; use code, then one lowercase inline comment naming exactly one rule id")
             )
             continue
-        reason = reason_of(lines[i - 1]) if i > 0 else None
+        reason = reason_of(lines, i - 1) if i > 0 else None
         if not reason or len(re.sub(r"\W", "", reason)) < MIN_REASON_CHARS:
             problems.append(
                 (number, "no reason comment on the line directly above; say why it is safe and name the guards")
@@ -103,7 +126,7 @@ def check_tree(root):
     found = []
     for path in iter_files(root):
         text = read_text(path)
-        if text is None or KEYWORD not in text:
+        if text is None or not DETECT.search(text):
             continue
         for number, message in check_text(text):
             found.append((os.path.relpath(path, root).replace(os.sep, "/"), number, message))

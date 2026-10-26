@@ -16,12 +16,16 @@ subprocess.run(args, shell=False, timeout=30)  # nosemgrep: python.lang.security
 
 Rules:
 
-- The comment is `nosemgrep: <rule-id>`, never bare. A bare `nosemgrep` hides
+- The comment is exactly lowercase `nosemgrep: <rule-id>`, inline after code on
+  the same line, never bare. Semgrep also honours the short `nosem` form in any
+  case, so those are rejected too, as is a standalone comment line holding only
+  the suppression (Semgrep's previous-line form). A bare `nosemgrep` hides
   every rule on the line, including ones added later.
 - One line, one rule. A line that needs two suppressions is a reason to change
   the code. Do not list several rule ids in one comment.
 - The line directly above is a comment with a one-line reason. It says why the
   line is safe and names the guards that make it so. No blank line between.
+  It is a real comment line: not code and not another suppression.
 - Where the guards can be tested, a test pins them, so removing a guard fails CI
   before the suppression becomes wrong. For the ffmpeg example above the
   guards are: an argument list, no shell, a fixed binary path, validated inputs
@@ -32,8 +36,9 @@ Rules:
   rule id and reason, so the reviewer sees each one.
 
 `semgrep.yml` runs `scripts/check_suppressions.py` on the caller's code and
-fails on a bare suppression, one with no rule id, one naming several rules, or
-one without a reason comment on the line directly above. It understands `#`,
+fails on a bare, short or uppercase suppression, one with no rule id, one naming
+several rules, two keywords on one line, a standalone suppression line, or one
+without a reason comment on the line directly above. It understands `#`,
 `//`, `--`, `;`, `%`, `/* */` and `<!-- -->` comments. It skips Markdown files
 and the `.strange-security` checkout. It checks the form only; whether the
 reason is true is the reviewer's call.
