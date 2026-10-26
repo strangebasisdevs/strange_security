@@ -1,0 +1,164 @@
+import importlib.util
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPT = os.path.join(HERE, "..", "scripts", "check_suppressions.py")
+
+spec = importlib.util.spec_from_file_location("check_suppressions", SCRIPT)
+cs = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cs)
+
+K = "no" + "semgrep"  # keep the keyword out of this file
+RULE = "python.lang.security.audit.dangerous-subprocess-use-audit"
+REASON = "argument list, no shell, fixed binary path, validated inputs, timeout"
+
+
+def lines_of(*lines):
+    return "\n".join(lines) + "\n"
+
+
+class CheckText(unittest.TestCase):
+    def ok(self, text):
+        self.assertEqual(cs.check_text(text), [])
+
+    def bad(self, text, count=1):
+        self.assertEqual(len(cs.check_text(text)), count, cs.check_text(text))
+
+    def test_valid_hash(self):
+        self.ok(lines_of("# " + REASON, "run(cmd)  # %s: %s" % (K, RULE)))
+
+    def test_valid_slash(self):
+        self.ok(lines_of("// " + REASON, "run(cmd); // %s: %s" % (K, RULE)))
+
+    def test_valid_sql_and_lua(self):
+        self.ok(lines_of("-- " + REASON, "select 1 -- %s: %s" % (K, RULE)))
+
+    def test_valid_block_comments(self):
+        self.ok(lines_of("/* " + REASON + " */", "run(cmd); /* %s: %s */" % (K, RULE)))
+        self.ok(lines_of(" * " + REASON, "run(cmd); /* %s: %s */" % (K, RULE)))
+        self.ok(lines_of("<!-- " + REASON + " -->", "<x/> <!-- %s: %s -->" % (K, RULE)))
+
+    def test_bare_fails(self):
+        self.bad(lines_of("# " + REASON, "run(cmd)  # " + K))
+
+    def test_bare_with_trailing_text_fails(self):
+        self.bad(lines_of("# " + REASON, "run(cmd)  # %s because it is fine" % K))
+
+    def test_colon_without_rule_fails(self):
+        self.bad(lines_of("# " + REASON, "run(cmd)  # %s:" % K))
+
+    def test_two_rules_fail(self):
+        self.bad(lines_of("# " + REASON, "run(cmd)  # %s: a.b, c.d" % K))
+        self.bad(lines_of("# " + REASON, "run(cmd)  # %s: a.b c.d" % K))
+
+    def test_not_a_comment_fails(self):
+        self.bad(lines_of("# " + REASON, "%s: %s" % (K, RULE)))
+
+    def test_missing_reason_fails(self):
+        self.bad(lines_of("run(cmd)  # %s: %s" % (K, RULE)))
+        self.bad(lines_of("x = 1", "run(cmd)  # %s: %s" % (K, RULE)))
+
+    def test_blank_line_above_fails(self):
+        self.bad(lines_of("# " + REASON, "", "run(cmd)  # %s: %s" % (K, RULE)))
+
+    def test_empty_or_tiny_reason_fails(self):
+        self.bad(lines_of("#", "run(cmd)  # %s: %s" % (K, RULE)))
+        self.bad(lines_of("# ok", "run(cmd)  # %s: %s" % (K, RULE)))
+        self.bad(lines_of("# ------------", "run(cmd)  # %s: %s" % (K, RULE)))
+
+    def test_reason_line_cannot_be_another_suppression(self):
+        text = lines_of(
+            "# " + REASON,
+            "a()  # %s: %s" % (K, RULE),
+            "b()  # %s: %s" % (K, RULE),
+        )
+        self.bad(text)
+
+    def test_two_suppressions_each_with_reason(self):
+        self.ok(lines_of(
+            "# " + REASON, "a()  # %s: %s" % (K, RULE),
+            "# " + REASON, "b()  # %s: %s" % (K, RULE),
+        ))
+
+    def test_first_line_fails(self):
+        self.bad(lines_of("run(cmd)  # %s: %s" % (K, RULE)))
+
+    def test_crlf_ok(self):
+        self.ok("# %s\r\nrun(cmd)  # %s: %s\r\n" % (REASON, K, RULE))
+
+    def test_line_numbers(self):
+        self.assertEqual(cs.check_text(lines_of("x", "y  # " + K))[0][0], 2)
+
+    def test_no_keyword_no_problem(self):
+        self.ok("print('hello')\n")
+
+
+class CheckTree(unittest.TestCase):
+    BAD = "x()  # " + K + "\n"
+
+    def make(self, files):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for rel, content in files.items():
+            path = os.path.join(tmp.name, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            mode = "wb" if isinstance(content, bytes) else "w"
+            with open(path, mode) as handle:
+                handle.write(content)
+        return tmp.name
+
+    def test_finds_violation_in_caller_code(self):
+        root = self.make({"src/app.py": self.BAD})
+        self.assertEqual([(p, n) for p, n, _ in cs.check_tree(root)], [("src/app.py", 1)])
+
+    def test_skips_shared_checkout_and_git(self):
+        root = self.make({
+            ".strange-security/x.py": self.BAD,
+            ".git/hooks/x": self.BAD,
+            "ok.py": "print(1)\n",
+        })
+        self.assertEqual(cs.check_tree(root), [])
+
+    def test_only_top_level_shared_checkout_is_skipped(self):
+        root = self.make({"src/.strange-security/x.py": self.BAD})
+        self.assertEqual(len(cs.check_tree(root)), 1)
+
+    def test_skips_markdown_and_binary(self):
+        root = self.make({"README.md": self.BAD, "blob.bin": b"\0\0" + self.BAD.encode()})
+        self.assertEqual(cs.check_tree(root), [])
+
+    def test_valid_file_passes(self):
+        root = self.make({"a.py": "# %s\nrun()  # %s: %s\n" % (REASON, K, RULE)})
+        self.assertEqual(cs.check_tree(root), [])
+
+
+class Cli(unittest.TestCase):
+    def run_cli(self, root):
+        return subprocess.run(
+            [sys.executable, "-I", SCRIPT, root], capture_output=True, text=True
+        )
+
+    def test_exit_codes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "a.py"), "w") as handle:
+                handle.write("print(1)\n")
+            self.assertEqual(self.run_cli(tmp).returncode, 0)
+            with open(os.path.join(tmp, "b.py"), "w") as handle:
+                handle.write("x()  # " + K + "\n")
+            result = self.run_cli(tmp)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("b.py", result.stdout)
+
+    def test_bad_root(self):
+        self.assertEqual(self.run_cli(os.path.join(HERE, "no-such-dir")).returncode, 2)
+
+    def test_this_repository_is_clean(self):
+        self.assertEqual(self.run_cli(os.path.join(HERE, "..")).returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

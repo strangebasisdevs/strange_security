@@ -61,6 +61,12 @@ jobs:
             --tag semgrep-scanner \
             .strange-security
 
+      # Policy check on the caller's code (docs/SUPPRESSIONS.md), run from the
+      # shared checkout with -I so the caller cannot influence the interpreter.
+      # The shared checkout itself is not scanned.
+      - name: Check Semgrep suppressions
+        run: python3 -I .strange-security/scripts/check_suppressions.py .
+
       # --error exits non-zero on any finding, so findings fail the job; the
       # upload below still runs and records them in code scanning.
       - name: Run Semgrep

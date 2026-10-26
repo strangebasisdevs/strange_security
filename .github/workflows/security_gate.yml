@@ -59,3 +59,32 @@ jobs:
   gitleaks:
     name: Gitleaks
     uses: ./.github/workflows/gitleaks.yml
+
+  # Exercises trivy-image.yml with a public, digest-pinned image: the Trivy
+  # scanner image this repository already pins in scanner-images/trivy.Dockerfile.
+  # Keep image and digest in step with that file when Dependabot updates it.
+  trivy-image:
+    name: Trivy image
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/trivy-image.yml
+    with:
+      image: aquasec/trivy
+      digest: sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222
+
+  tests:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run unit tests
+        run: python3 -m unittest discover --start-directory tests --verbose
