@@ -23,14 +23,14 @@ def lines_of(*lines):
 
 
 class CheckText(unittest.TestCase):
-    def ok(self, text, ext=""):
+    def ok(self, text, ext=".c"):
         self.assertEqual(cs.check_text(text, ext), [])
 
-    def bad(self, text, count=1, ext=""):
+    def bad(self, text, count=1, ext=".c"):
         self.assertEqual(len(cs.check_text(text, ext)), count, cs.check_text(text, ext))
 
     def test_valid_hash(self):
-        self.ok(lines_of("# " + REASON, "run(cmd)  # %s: %s" % (K, RULE)))
+        self.ok(lines_of("# " + REASON, "run(cmd)  # %s: %s" % (K, RULE)), ".py")
 
     def test_valid_slash(self):
         self.ok(lines_of("// " + REASON, "run(cmd); // %s: %s" % (K, RULE)))
@@ -110,7 +110,7 @@ class CheckText(unittest.TestCase):
                 self.bad(lines_of("# " + REASON + ch + "more", "run(cmd)  # %s: %s" % (K, RULE)))
 
     def test_tab_and_cr_still_fine(self):
-        self.ok("# %s\r\nrun(cmd)\t# %s: %s\r\n" % (REASON, K, RULE))
+        self.ok("# %s\r\nrun(cmd)\t# %s: %s\r\n" % (REASON, K, RULE), ".py")
 
     def test_bare_fails(self):
         self.bad(lines_of("# " + REASON, "run(cmd)  # " + K))
@@ -146,7 +146,7 @@ class CheckText(unittest.TestCase):
             "a()  # %s: %s" % (K, RULE),
             "b()  # %s: %s" % (K, RULE),
         )
-        self.bad(text)
+        self.bad(text, ext=".py")
 
     def test_reason_line_itself_a_suppression_fails(self):
         # Previously surviving mutation: the line above is a suppression comment.
@@ -191,17 +191,47 @@ class CheckText(unittest.TestCase):
         self.ok(lines_of("/*", " * " + REASON, " * more text here", "run(); // %s: %s" % (K, RULE)))
         self.bad(lines_of(" * " + REASON, "run(); // %s: %s" % (K, RULE)))
 
+    def test_slash_markers_depend_on_extension(self):
+        # Python floor division is not a reason comment.
+        for text in (lines_of("x = a // b", "run(cmd)  # %s: %s" % (K, RULE)),
+                     lines_of("value = (1000000000", "// 1000000000)", "run(cmd)  # %s: %s" % (K, RULE))):
+            for ext in (".py", ".rb", ".sh", ".yml", ""):
+                with self.subTest(ext=ext, text=text):
+                    self.bad(text, ext=ext)
+        # "// reason" is not a reason, and "//" does not mark an inline suppression, in non-C files.
+        for ext in (".py", ".rb", ".sh", ".yml", ""):
+            with self.subTest(ext=ext):
+                self.bad(lines_of("// " + REASON, "run(cmd)  # %s: %s" % (K, RULE)), ext=ext)
+                self.bad(lines_of("# " + REASON, "run(cmd)  // %s: %s" % (K, RULE)), ext=ext)
+                self.bad(lines_of("/* " + REASON + " */", "run(cmd)  # %s: %s" % (K, RULE)), ext=ext)
+        for ext in (".js", ".ts", ".go", ".rs", ".java", ".kt", ".swift", ".cs", ".php", ".scala", ".c"):
+            with self.subTest(ext=ext):
+                self.ok(lines_of("// " + REASON, "run(cmd); // %s: %s" % (K, RULE)), ext)
+                self.ok(lines_of("/* " + REASON + " */", "run(cmd); /* %s: %s */" % (K, RULE)), ext)
+        self.ok(lines_of("/* " + REASON + " */", "a { b: c; } /* %s: %s */" % (K, RULE)), ".css")
+        self.bad(lines_of("// " + REASON, "a { b: c; } /* %s: %s */" % (K, RULE)), ext=".css")
+
+    def test_star_dereference_with_inline_suppression_is_code(self):
+        self.ok(lines_of("// " + REASON, "*p = 1;  // %s: %s" % (K, RULE)), ".c")
+        self.ok(lines_of("// " + REASON, "*destination = value; // %s: %s" % (K, RULE)), ".c")
+        self.ok(lines_of("x = 1;", "// " + REASON, "*p = 1;  // %s: %s" % (K, RULE)), ".c")
+        # Inside an open block a star line is a comment, so a suppression there is bare.
+        self.bad(lines_of("/*", " * " + REASON, " * p = 1;  // %s: %s" % (K, RULE)), ext=".c")
+        self.bad(lines_of("/*", " * %s: %s" % (K, RULE)), ext=".c")
+        # Outside a block a star-only prefix is still Semgrep's previous-line form.
+        self.bad(lines_of("// " + REASON, "* %s: %s" % (K, RULE)), ext=".c")
+
     def test_two_suppressions_each_with_reason(self):
         self.ok(lines_of(
             "# " + REASON, "a()  # %s: %s" % (K, RULE),
             "# " + REASON, "b()  # %s: %s" % (K, RULE),
-        ))
+        ), ".py")
 
     def test_first_line_fails(self):
         self.bad(lines_of("run(cmd)  # %s: %s" % (K, RULE)))
 
     def test_crlf_ok(self):
-        self.ok("# %s\r\nrun(cmd)  # %s: %s\r\n" % (REASON, K, RULE))
+        self.ok("# %s\r\nrun(cmd)  # %s: %s\r\n" % (REASON, K, RULE), ".py")
 
     def test_line_numbers(self):
         self.assertEqual(cs.check_text(lines_of("x", "y  # " + K))[0][0], 2)

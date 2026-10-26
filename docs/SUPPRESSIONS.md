@@ -40,9 +40,13 @@ Rules:
 `semgrep.yml` runs `scripts/check_suppressions.py` on the caller's code and
 fails on a bare, short or uppercase suppression, one with no rule id, one naming
 several rules, two keywords on one line, a standalone suppression line, or one
-without a reason comment on the line directly above. It understands `//`,
-`/* */` and `<!-- -->` comments in every file, and the markers that are also
-code elsewhere only for the listed file types:
+without a reason comment on the line directly above. It understands
+`<!-- -->` comments in every file, and the markers that are also code
+elsewhere only for the listed file types:
+
+- `//` and `/* */` count only in C-family, JS/TS, Go, Rust, Java, Kotlin,
+  Swift, C#, PHP, Scala, Dart, HTML/Vue/Svelte and similar files (`/* */` also
+  in CSS). In Python, Ruby and shell, `//` is floor division or a path.
 
 - `#` counts only in shell, Python, Ruby, Perl, PHP, R, YAML, TOML, conf, cfg
   and ini files, Terraform/HCL, PowerShell and a few similar types, in

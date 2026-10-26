@@ -10,7 +10,9 @@ directly above it must be a comment giving the reason:
     subprocess.run(cmd)  # <marker>: python.lang.security.audit.dangerous-subprocess-use-audit
 
 where <marker> is the Semgrep suppression keyword (spelled out in the policy).
-Comment syntaxes: //  /* */  <!-- -->  everywhere; "#" only in shell/Python/
+Comment syntaxes: <!-- --> everywhere; "//" and "/* */" only in C-family, JS/TS,
+Go, Rust, Java, Kotlin, Swift, C#, PHP, Scala, CSS and similar files (in Python
+or shell "//" is floor division or a path, not a comment); "#" only in shell/Python/
 Ruby/Perl/YAML/TOML/R/conf/ini files, Dockerfile, Makefile and extensionless
 files (not C-family or JS/TS, where it is a preprocessor line or a private
 field); ";" only in .ini/.asm/.el/
@@ -40,9 +42,19 @@ MAX_BYTES = 2 * 1024 * 1024
 RULE_ID = r"[A-Za-z0-9_][A-Za-z0-9_.\-]*"
 MIN_REASON_CHARS = 8
 
-# Always comment markers. The ambiguous ones are decided by file extension:
-# ';' is code in C-like languages, '%' is an operator, '--' is a decrement.
-BASE_MARKERS = ("//", "/*", "<!--")
+# Always a comment marker. The ambiguous ones are decided by file extension:
+# ';' is code in C-like languages, '%' is an operator, '--' is a decrement,
+# and '//' is floor division in Python.
+BASE_MARKERS = ("<!--",)
+# '//' and '/* */' are comments only in these files.
+SLASH_EXTS = (
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".m", ".mm", ".cs", ".java", ".kt",
+    ".kts", ".swift", ".go", ".rs", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+    ".php", ".scala", ".sc", ".groovy", ".gradle", ".dart", ".scss", ".less", ".proto", ".zig",
+    ".sol", ".vue", ".svelte", ".astro", ".html", ".htm", ".jsonc", ".json5",
+)
+# '/* */' without '//'.
+BLOCK_ONLY_EXTS = (".css",)
 # '#' is a comment only in these files. In C-family code it starts a
 # preprocessor line, and in JS/TS it marks a private field, so it is not one.
 # Extensionless files (shell scripts, dotfiles) and Dockerfile/Makefile count.
@@ -71,7 +83,9 @@ class Syntax:
 
     def __init__(self, ext=""):
         ext = ext.lower()
-        markers = list(BASE_MARKERS) + (["#"] if ext in HASH_EXTS else []) + [m for m, exts in EXTRA_MARKERS.items() if ext in exts]
+        slash = ext in SLASH_EXTS
+        self.block = slash or ext in BLOCK_ONLY_EXTS
+        markers = list(BASE_MARKERS) + (["//"] if slash else []) + (["/*"] if self.block else []) + (["#"] if ext in HASH_EXTS else []) + [m for m, exts in EXTRA_MARKERS.items() if ext in exts]
         start = "(?:" + "|".join(re.escape(m) for m in markers) + ")"
         # Code, then one inline comment naming one rule, lowercase keyword,
         # nothing after it except a closing comment marker.
@@ -80,7 +94,8 @@ class Syntax:
             + r"[ \t]*(?:\*/|-->)?[ \t]*$"
         )
         self.comment_line = re.compile(r"^[ \t]*" + start)
-        strip = [r"//+", r"/\*+", r"\*+", "<!--"] + ([r"#+"] if "#" in markers else [])
+        strip = [r"\*+", "<!--"] + ([r"//+"] if slash else []) + ([r"/\*+"] if self.block else [])
+        strip += [r"#+"] if "#" in markers else []
         strip += [re.escape(m) + "+" for m in markers if m in (";", "%", "--")]
         self.strip = re.compile(r"^[ \t]*(?:" + "|".join(strip) + r")[ \t]*")
 
@@ -90,8 +105,10 @@ def split_lines(text):
     return [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
 
 
-def in_block_comment(lines, i):
+def in_block_comment(lines, i, syntax):
     """True if lines[i], which starts with '*', continues an open /* comment."""
+    if not syntax.block:
+        return False
     j = i - 1
     while j >= 0 and STAR_LINE.match(lines[j]):
         if "*/" in lines[j]:
@@ -113,7 +130,7 @@ def reason_of(lines, i, syntax):
     if DETECT.search(line) or CONTROL.search(line):
         return None
     if STAR_LINE.match(line):
-        if not in_block_comment(lines, i) or closes_with_code(line, "*", "*/"):
+        if not in_block_comment(lines, i, syntax) or closes_with_code(line, "*", "*/"):
             return None
     elif not syntax.comment_line.match(line):
         return None
@@ -150,7 +167,10 @@ def check_text(text, ext=""):
         if CONTROL.search(line):
             problems.append((number, "control character on a suppression line; remove it"))
             continue
-        standalone = syntax.comment_line.match(line) or STAR_LINE.match(line) or previous_line_form(line)
+        # A leading '*' is a comment only inside an open /* block; elsewhere it
+        # is a dereference (`*p = 1;`) and the line is code.
+        star_comment = STAR_LINE.match(line) and in_block_comment(lines, i, syntax)
+        standalone = syntax.comment_line.match(line) or star_comment or previous_line_form(line)
         if len(found) != 1 or standalone or not syntax.valid.search(line):
             problems.append(
                 (number, "bare or malformed suppression; use code, then one lowercase inline comment naming exactly one rule id")
