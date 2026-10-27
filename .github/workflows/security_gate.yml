@@ -31,7 +31,7 @@ jobs:
         run: |
           status=0
           for file in .github/workflows/*.yml; do
-            grep -q '^  workflow_call:' "$file" || continue
+            grep -qE '^([^A-Za-z_ #:]?on[^A-Za-z_ #:]?:[^#]*[^A-Za-z_]workflow_call([^A-Za-z_]|$)|[ ]+workflow_call:)' "$file" || continue
             if grep -nE '^[^#]*github\.(workflow_ref|workflow_sha|job_workflow_sha)' "$file"; then
               echo "::error file=$file::uses the caller's github.workflow_* context; use job.workflow_repository and job.workflow_sha"
               status=1
@@ -59,3 +59,37 @@ jobs:
   gitleaks:
     name: Gitleaks
     uses: ./.github/workflows/gitleaks.yml
+
+  # Exercises trivy-image.yml with a public, digest-pinned image that has no OS
+  # packages: Google's distroless static image (Debian 12 based, ca-certs, tzdata
+  # and /etc files only). It is deliberately not a scanner or app image, whose
+  # CVE status drifts with the Trivy DB and would turn this gate red on a day
+  # nothing in this repository changed. Multi-arch index digest of the "latest"
+  # tag of gcr.io/distroless/static-debian12, resolved 2026-10-26. Refresh by
+  # hand if it ever becomes unpullable; do not point this at trivy.Dockerfile's
+  # image, Dependabot owns that file.
+  trivy-image:
+    name: Trivy image
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/trivy-image.yml
+    with:
+      image: gcr.io/distroless/static-debian12
+      digest: sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2
+
+  tests:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run unit tests
+        run: python3 -m unittest discover --start-directory tests --verbose

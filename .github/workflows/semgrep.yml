@@ -61,20 +61,35 @@ jobs:
             --tag semgrep-scanner \
             .strange-security
 
+      # The SARIF goes to a dedicated directory under the runner's temp
+      # directory (the only writable mount), outside the caller's tree,
+      # so the suppression check below sees only the caller's files (SARIF holds
+      # source snippets that contain suppression comments).
       # --error exits non-zero on any finding, so findings fail the job; the
       # upload below still runs and records them in code scanning.
       - name: Run Semgrep
         run: |
+          mkdir -p "$RUNNER_TEMP/semgrep"
           docker run --rm \
-            --volume "$PWD:/src" \
+            --volume "$PWD:/src:ro" \
+            --volume "$RUNNER_TEMP/semgrep:/out" \
             --workdir /src \
             semgrep-scanner \
             semgrep scan --config p/default --exclude .strange-security \
-            --error --sarif --output /src/semgrep.sarif /src
+            --error --sarif --output /out/semgrep.sarif /src
 
       - name: Upload SARIF results
         if: always()
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
-          sarif_file: semgrep.sarif
+          sarif_file: ${{ runner.temp }}/semgrep/semgrep.sarif
           category: semgrep
+
+      # Policy check on the caller's code (docs/SUPPRESSIONS.md), run from the
+      # shared checkout with -I so the caller cannot influence the interpreter.
+      # The shared checkout itself is not scanned. Last, with always(), so a
+      # failing check cannot skip the scan or the upload, and a failing scan
+      # or upload cannot skip the check; any one failing fails the job.
+      - name: Check Semgrep suppressions
+        if: always()
+        run: python3 -I .strange-security/scripts/check_suppressions.py .

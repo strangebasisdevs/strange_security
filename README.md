@@ -21,7 +21,7 @@ their SARIF reports even when a scan fails the job.
 
 Semgrep and Trivy also check out this repository into `.strange-security`, at
 the exact commit the called workflow file came from, so they can build the
-Dependabot-pinned scanner images in `.github/docker/`. That directory is
+Dependabot-pinned scanner images in `scanner-images/`. The checkout is
 excluded from the scans. The commit comes from `job.workflow_repository` and
 `job.workflow_sha`, not from the `github` context, which in a called workflow
 describes the caller.
@@ -61,8 +61,11 @@ jobs:
 
 The caller must grant `contents: read` so scans can check out its source and
 `security-events: write` so results can be uploaded to GitHub code scanning.
-Calling at `@main` is the organisation's one exception to SHA pinning, and it
-applies only to these org-owned reusable workflows.
+Releases and tags (`v1.0.0` and later) are cut from this repository. Consumers
+pin the reusable workflows by full commit SHA with the release in a comment,
+for example `.../semgrep.yml@<40-hex-sha> # v1.0.0`, and Dependabot moves the
+pin. The `@main` in the examples above is shorthand for that; do not reference
+a branch or tag in a real workflow.
 
 ### Scanning a container image
 
@@ -90,6 +93,7 @@ jobs:
     with:
       image: ghcr.io/strangebasisdevs/strange_ringtone
       digest: ${{ needs.publish.outputs.digest }}
+      registry-login: true # only for a private image
 
   tag:
     needs: [publish, scan]
@@ -98,10 +102,16 @@ jobs:
 
 The job is named `Trivy image scan`. The workflow scans exactly
 `image@digest` and rejects an `image` that carries a tag or digest, or a
-`digest` that is not `sha256:` plus 64 hex characters. It logs in to GHCR as
-`github.actor` with the caller's `GITHUB_TOKEN`, so the caller must also grant
-`packages: read`; no secrets are passed. That covers private images in the same
-organisation, provided the calling repository has read access to the package.
+`digest` that is not `sha256:` plus 64 hex characters. Public images
+need no login. For a private image pass `registry-login: true`: the workflow
+then runs `docker login ghcr.io` as `github.actor` with the caller's
+`GITHUB_TOKEN` (through stdin, not a third-party action); no secrets are
+passed. Caveat: `trivy-image.yml` still requests `packages: read` at the top
+level of the workflow, whatever `registry-login` is, so every caller must grant
+`packages: read` on the calling job, public image or not, or GitHub rejects the
+call. That will be narrowed in Phase A step 2. Login covers private images
+in the same organisation, provided the calling repository has read access to
+the package.
 
 Pull requests from forks get a read-only `GITHUB_TOKEN`, so the SARIF upload
 steps fail there even when the scans pass. Do not work around this with
@@ -143,7 +153,7 @@ the working tree:
 Either scan fails the job, and both reports are uploaded either way. The
 categories include the image name, so a caller that scans several images
 keeps a separate code scanning result for each. The runner's Docker daemon
-pulls the image after logging in, and Trivy reads it through the Docker
+pulls the image (after logging in, if asked to), and Trivy reads it through the Docker
 socket, so the registry credentials never enter the Trivy container. The
 caller's `.trivyignore` and `trivy.yaml` apply, as for the filesystem scan.
 
@@ -161,17 +171,40 @@ rather than the gitleaks GitHub Action.
 
 ### Suppressions
 
+The policy is in [docs/SUPPRESSIONS.md](docs/SUPPRESSIONS.md): inline
+`nosemgrep: <rule-id>` with a reason line above, never for Trivy or gitleaks.
+Semgrep fails on a bare suppression or one without a reason (the
+`Check Semgrep suppressions` step runs `scripts/check_suppressions.py` on the
+caller's code). Repositories point their `CLAUDE.md` at that file rather than
+restating it.
+
 The scanners read suppressions from the caller's repository: `.semgrepignore`
 and `nosemgrep` comments, `.trivyignore` and `trivy.yaml`, and `.gitleaks.toml`
 and `.gitleaksignore`. A pull request that adds or changes one of these can
 silence a finding, so review those files as security-relevant.
+
+## Tests
+
+`python3 -m unittest discover --start-directory tests` runs the standard-library
+unit tests, and the `Unit tests` job in the security gate runs them on every
+pull request. They cover:
+
+- the image and digest validation in `trivy-image.yml`, by extracting the real
+  step and running it under bash, including multiline inputs;
+- the suppression check in `scripts/check_suppressions.py`, including which
+  comment markers count for which file extensions;
+- the structure of the workflow files in `tests/test_workflows.py` (checker
+  step ordering, SARIF written to a dedicated directory outside the workspace
+  with the source mounted read-only, conditional registry login,
+  reusable-workflow detection checked per line and against a real `grep -E`
+  when one is installed, digest-pinned gate image).
 
 ## Maintenance
 
 Third-party actions are pinned to full commit SHAs, and scanner container
 images are pinned to immutable digests, to reduce supply-chain risk. Dependabot
 checks the GitHub Actions pins in `.github/workflows` and the image pins in
-`.github/docker` every Monday at 09:00 UTC, with a seven-day cooldown on new
+`scanner-images` every Monday at 09:00 UTC, with a seven-day cooldown on new
 releases. Dependabot does not track the gitleaks binary in `gitleaks.yml`;
 update its version and sha256 together by hand.
 
@@ -184,3 +217,8 @@ workflow share one repository. That hides any mix-up between the two, so its
 `contract` job also fails if a reusable workflow reads the caller's
 `github.workflow_*` context or checks out `.strange-security` without
 `job.workflow_repository` and `job.workflow_sha`.
+
+The gate also calls `trivy-image.yml` on the digest-pinned public image
+`gcr.io/distroless/static-debian12`, so every reusable workflow runs on every
+pull request. That image is not tied to `scanner-images/trivy.Dockerfile`;
+refresh its digest in `security_gate.yml` by hand.

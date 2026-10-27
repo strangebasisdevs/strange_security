@@ -11,6 +11,14 @@ on:
         description: Manifest digest to scan, e.g. sha256:0123...
         required: true
         type: string
+      registry-login:
+        description: >-
+          Log in to ghcr.io as github.actor with the caller's GITHUB_TOKEN
+          before pulling, for private images. The caller must then grant
+          packages read. Leave false for public images.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -94,15 +102,17 @@ jobs:
             --tag trivy-scanner \
             .strange-security
 
-      # Release images may stay private until they are tagged.
+      # Optional, for private images only. Uses the docker CLI rather than a
+      # third-party action. The token reaches docker through stdin from an
+      # environment variable, never a command-line argument.
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        if: ${{ inputs.registry-login }}
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
 
-      # Pulled by the runner's Docker daemon, which holds the login, and handed
+      # Pulled by the runner's Docker daemon, which holds any login, and handed
       # to Trivy through the socket so Trivy never sees the credentials.
       - name: Pull image
         id: pull
