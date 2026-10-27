@@ -255,8 +255,11 @@ class Inputs(unittest.TestCase):
         self.assertGreaterEqual(len(images), 2)
         for ref in images:
             with self.subTest(image=ref):
-                self.assertRegex(ref, r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
-        self.assertEqual(len({r.split("@")[0] for r in images}), len(images))
+                self.assertRegex(ref, r"^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?@sha256:[0-9a-f]{64}$")
+        # Both digest forms run in CI: repo@digest and repo:tag@digest.
+        self.assertTrue(any(r.startswith("gcr.io/distroless/static-debian12@sha256:") for r in images))
+        self.assertTrue(any(r.startswith("registry.k8s.io/pause:3.10@sha256:") for r in images))
+        self.assertEqual(len({r.split("@")[0].split(":")[0] for r in images}), len(images))
         # The dated comment above the job says when the digests were resolved.
         self.assertRegex(read("security_gate.yml"), r"resolved from the registry\s+#\s+API on 20\d\d-\d\d-\d\d")
 

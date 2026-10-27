@@ -186,7 +186,11 @@ bundle, a compose stack, a base-image list). It does not replace
 | `registry-login` | boolean | `false` | Log in to `ghcr.io` with the `registry-token` secret before pulling. |
 
 The optional `registry-token` secret is a read-only package token, used only
-when `registry-login` is `true` (see above).
+when `registry-login` is `true` (see above). Uppercase letters are rejected
+only in the repository part of a reference; tags follow Docker's tag rules, so
+`alpine:Latest` is accepted. A secret name cannot contain a hyphen, so
+`registry-token` cannot come through `secrets: inherit` and must be mapped
+explicitly, for example `registry-token: ${{ secrets.GHCR_READ_TOKEN }}`.
 
 ```yaml
 jobs:
@@ -371,7 +375,7 @@ second, job-level `permissions` block.
 
 The gate also calls `trivy-image.yml` on the digest-pinned public image
 `gcr.io/distroless/static-debian12`, and `trivy-images.yml` on that image plus
-`registry.k8s.io/pause`, also digest-pinned, so every reusable workflow runs on
+`registry.k8s.io/pause:3.10@sha256:...` (tag and digest), also digest-pinned, so every reusable workflow runs on
 every pull request, with `upload-sarif: false` and a non-default
 `timeout-minutes` so those inputs run too, and with the full cap granted (no
 `packages`). The images are not tied to `scanner-images/trivy.Dockerfile`;

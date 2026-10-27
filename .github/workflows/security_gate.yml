@@ -136,7 +136,8 @@ jobs:
   # gcr.io/distroless/static-debian12 (the multi-arch index digest of its
   # "latest" tag, as above) and registry.k8s.io/pause (one static binary on an
   # empty base; index digest of the 3.10 tag). Both resolved from the registry
-  # API on 2026-10-27. Refresh by hand if one becomes unpullable or gains a
+  # API on 2026-10-27. The distroless image is written repo@digest and pause as
+  # repo:tag@digest, so both digest forms run in CI. Refresh by hand if one becomes unpullable or gains a
   # fixable HIGH or CRITICAL finding, and pick another small public image then;
   # do not point this at trivy.Dockerfile's image, Dependabot owns that file.
   # Like the call above it opts out of the SARIF upload, uses a non-default
@@ -153,7 +154,7 @@ jobs:
       timeout-minutes: 25
       images: |
         gcr.io/distroless/static-debian12@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2
-        registry.k8s.io/pause@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a
+        registry.k8s.io/pause:3.10@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a
 
   tests:
     name: Unit tests
