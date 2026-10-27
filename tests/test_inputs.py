@@ -4,6 +4,7 @@ workflow and run under bash, so the tests cannot drift from what CI executes."""
 import os
 import re
 import subprocess
+import tempfile
 import unittest
 
 from tests.test_trivy_image_validation import BASH, extract_run_block
@@ -23,12 +24,51 @@ def input_block(text, name):
     return match.group(1)
 
 
+_ID = r"[A-Za-z-]+"
+_TOKEN = r"(?:\"%s\"|'%s'|%s)" % (_ID, _ID, _ID)
+_ENTRY = re.compile(r"^(%s)[ \t]*:[ \t]+(%s)$" % (_TOKEN, _TOKEN))
+
+
+def _unquote(token):
+    return token[1:-1] if token[:1] in "\"'" else token
+
+
+def parse_permissions(text):
+    """Every permissions block of a workflow as (entries, errors).
+
+    A block is all lines indented deeper than its permissions: key, up to the
+    next line at the same or lower indent; only blank and full-line comment
+    lines are skipped. Entries are (scope, level) with quotes and trailing
+    comments removed. Anything that does not parse as key: value, and any
+    inline (flow-style or scalar) value, is an error."""
+    lines = text.replace("\r", "").split("\n")
+    entries, errors = [], []
+    for i, line in enumerate(lines):
+        match = re.match(r"^([ \t]*)permissions:(.*)$", line)
+        if not match:
+            continue
+        indent = len(match.group(1))
+        inline = re.sub(r"^#.*|[ \t]+#.*$", "", match.group(2).strip()).strip()
+        if inline:
+            errors.append("inline permissions: " + inline)
+            continue
+        for raw in lines[i + 1:]:
+            if not raw.strip() or raw.lstrip().startswith("#"):
+                continue
+            if len(raw) - len(raw.lstrip()) <= indent:
+                break
+            entry = re.sub(r"[ \t]+#.*$", "", raw.strip()).strip()
+            parsed = _ENTRY.match(entry)
+            if parsed:
+                entries.append((_unquote(parsed.group(1)), _unquote(parsed.group(2))))
+            else:
+                errors.append("unparsable entry: " + entry)
+    return entries, errors
+
+
 def declared_permissions(text):
     """The permissions block as {scope: level}; empty when there is none."""
-    match = re.search(r"(?m)^\s*permissions:[ \t]*\n((?:[ \t]+[a-z-]+:[ \t]*\w+[ \t]*(?:#.*)?\n)+)", text)
-    if not match:
-        return {}
-    return dict(re.findall(r"([a-z-]+):[ \t]*(\w+)", match.group(1)))
+    return dict(parse_permissions(text)[0])
 
 
 def permission_count(text):
@@ -48,12 +88,41 @@ def cap_problems(text):
     problems = []
     if permission_count(text) != 1:
         problems.append("not exactly one permissions block")
-    if declared_permissions(text) != expected_cap(text):
+    entries, errors = parse_permissions(text)
+    problems.extend(errors)
+    keys = [key for key, _ in entries]
+    problems.extend("duplicate key: " + key for key in sorted({k for k in keys if keys.count(k) > 1}))
+    if dict(entries) != expected_cap(text):
         problems.append("cap differs from the expected one")
     return problems
 
 
 FULL_CAP = "permissions:\n  actions: read\n  contents: read\n  security-events: write\n\njobs:\n  a:\n    uses: x\n"
+
+
+def _with_extra(extra):
+    return FULL_CAP.replace("\n\njobs", "\n" + extra + "\n\njobs")
+
+
+# Each of these must be rejected by the python helper and by the gate shell.
+MUTATIONS = {
+    "quoted packages": _with_extra('  "packages": read'),
+    "quoted id-token": _with_extra("  'id-token': write"),
+    "extra scope after a blank line": FULL_CAP.replace("\n\njobs", "\n\n  issues: write\n\njobs"),
+    "extra scope after a comment line": _with_extra("  # note\n  issues: write"),
+    "flow style": "permissions: { actions: read, contents: read, security-events: write }\n\njobs:\n  a:\n    uses: x\n",
+    "write-all": "permissions: write-all\n\njobs:\n  a:\n    uses: x\n",
+    "read-all": "permissions: read-all # all\n\njobs:\n  a:\n    uses: x\n",
+    "duplicate key": _with_extra("  contents: read"),
+    "unparsable line": _with_extra("  issues write"),
+    "quoted value": FULL_CAP.replace("contents: read", 'contents: "write"'),
+}
+# Valid spellings of the exact cap.
+ACCEPTED = {
+    "trailing comments": FULL_CAP.replace("actions: read", "actions: read # needed").replace("write\n", "write   # sarif\n"),
+    "quoted keys and values": FULL_CAP.replace("actions: read", "\"actions\": 'read'").replace("contents: read", "'contents': \"read\""),
+    "blank and comment lines inside": FULL_CAP.replace("  contents", "\n  # c\n  contents"),
+}
 
 
 class Inputs(unittest.TestCase):
@@ -113,12 +182,19 @@ class Inputs(unittest.TestCase):
             "packages": FULL_CAP.replace("\n\njobs", "  packages: read\n\njobs"),
             "extra write": FULL_CAP.replace("\n\njobs", "  id-token: write\n\njobs"),
             "job-level block": FULL_CAP + "    permissions:\n      contents: read\n",
+            **MUTATIONS,
         }
         for label, text in bad.items():
             with self.subTest(case=label):
                 self.assertNotEqual(cap_problems(text + sarif), [])
         # Without a SARIF upload the cap would not include security-events.
         self.assertNotEqual(cap_problems(FULL_CAP), [])
+
+    def test_cap_check_accepts_valid_spellings(self):
+        sarif = "uses: github/codeql-action/upload-sarif@x\n"
+        for label, text in ACCEPTED.items():
+            with self.subTest(case=label):
+                self.assertEqual(cap_problems(text + sarif), [])
 
     def test_gate_contract_job_requires_the_cap(self):
         gate = read("security_gate.yml")
@@ -165,6 +241,44 @@ class Inputs(unittest.TestCase):
         self.assertIn("secrets.GITHUB_TOKEN", login)
         self.assertIn("if: ${{ inputs.registry-login }}", login)
         self.assertRegex(input_block(text, "registry-login"), r"default:\s*false\b")
+
+
+@unittest.skipUnless(BASH, "bash is required")
+class GateContractShell(unittest.TestCase):
+    """Run the gate's contract step itself on temp copies of a workflow dir."""
+
+    STEP_NAME = "Check how shared workflows locate themselves"
+
+    def run_contract(self, workflow_text):
+        script = extract_run_block(os.path.join(WORKFLOWS, "security_gate.yml"), self.STEP_NAME)
+        with tempfile.TemporaryDirectory() as tmp:
+            flows = os.path.join(tmp, ".github", "workflows")
+            os.makedirs(flows)
+            with open(os.path.join(flows, "a.yml"), "w", encoding="utf-8", newline="") as handle:
+                handle.write("on:\n  workflow_call:\n" + workflow_text)
+            return subprocess.run([BASH, "-c", script], cwd=tmp, capture_output=True, text=True)
+
+    def test_accepts_the_exact_cap_in_every_spelling(self):
+        sarif = "uses: github/codeql-action/upload-sarif@x\n"
+        for label, text in {"plain": FULL_CAP, **ACCEPTED}.items():
+            with self.subTest(case=label):
+                result = self.run_contract(text + sarif)
+                self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_rejects_every_entry_outside_the_cap(self):
+        sarif = "uses: github/codeql-action/upload-sarif@x\n"
+        for label, text in MUTATIONS.items():
+            with self.subTest(case=label):
+                result = self.run_contract(text + sarif)
+                self.assertNotEqual(result.returncode, 0, label)
+                self.assertIn("permissions", result.stdout)
+
+    def test_rejects_a_missing_entry_and_crlf_does_not_hide_one(self):
+        sarif = "uses: github/codeql-action/upload-sarif@x\n"
+        self.assertNotEqual(self.run_contract(FULL_CAP.replace("  actions: read\n", "") + sarif).returncode, 0)
+        self.assertEqual(self.run_contract((FULL_CAP + sarif).replace("\n", "\r\n")).returncode, 0)
+        extra = _with_extra('  "packages": read') + sarif
+        self.assertNotEqual(self.run_contract(extra.replace("\n", "\r\n")).returncode, 0)
 
 
 @unittest.skipUnless(BASH, "bash is required")

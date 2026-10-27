@@ -43,7 +43,37 @@ jobs:
               echo "::error file=$file::must declare exactly one top-level permissions block and no job-level one"
               status=1
             fi
-            declared=$(tr -d '\r' < "$file" | awk '/^permissions:/ {f=1; next} f && /^[^[:space:]#]/ {f=0} f && /^[[:space:]]+[a-z-]+:/ {sub(/^[[:space:]]+/, ""); sub(/[[:space:]]*(#.*)?$/, ""); print}' | sort | tr '\n' ',')
+            # Take the whole top-level block (every line indented under it, skipping only
+            # blank and full-line comment lines), normalise each entry (quotes around
+            # key and value, trailing comment, whitespace) and mark what does not parse
+            # as key: value, so flow-style or scalar permissions and any odd entry fail
+            # the comparison below. A duplicate key stays twice in the list and fails too.
+            declared=$(tr -d '\r' < "$file" | awk '
+              BEGIN {
+                id = "[A-Za-z-]+"
+                tok = "(\042" id "\042|\047" id "\047|" id ")"
+              }
+              /^permissions:/ {
+                f = 1; r = $0
+                sub(/^permissions:/, "", r); sub(/^[ \t]+/, "", r)
+                sub(/^#.*/, "", r); sub(/[ \t]+#.*$/, "", r); sub(/[ \t]+$/, "", r)
+                if (r != "") print "INLINE " r
+                next
+              }
+              f {
+                if ($0 ~ /^[ \t]*$/ || $0 ~ /^[ \t]*#/) next
+                if ($0 ~ /^[^ \t]/) { f = 0; next }
+                l = $0
+                sub(/^[ \t]+/, "", l); sub(/[ \t]+#.*$/, "", l); sub(/[ \t]+$/, "", l)
+                if (l ~ ("^" tok "[ \t]*:[ \t]+" tok "$")) {
+                  i = index(l, ":")
+                  k = substr(l, 1, i - 1); v = substr(l, i + 1)
+                  gsub(/[ \t\042\047]/, "", k); gsub(/[ \t\042\047]/, "", v)
+                  print k ": " v
+                } else {
+                  print "INVALID " l
+                }
+              }' | sort | tr '\n' ',')
             expected='actions: read,contents: read,'
             if grep -q 'upload-sarif@' "$file"; then
               expected="${expected}security-events: write,"
