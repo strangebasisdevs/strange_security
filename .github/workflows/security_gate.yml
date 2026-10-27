@@ -36,6 +36,17 @@ jobs:
               echo "::error file=$file::uses the caller's github.workflow_* context; use job.workflow_repository and job.workflow_sha"
               status=1
             fi
+            # Called workflows declare no permissions block: the job runs with what
+            # the caller grants, so upload-sarif: false and a login-free image scan
+            # need no security-events or packages permission.
+            if grep -nE '^permissions:' "$file"; then
+              echo "::error::declares top-level permissions, which forces callers to grant them even when unused"
+              status=1
+            fi
+            if grep -nE '^[[:space:]]*(packages|security-events):[[:space:]]*(read|write|none)' "$file"; then
+              echo "::error::declares a packages or security-events permission"
+              status=1
+            fi
             if grep -q '\.strange-security' "$file"; then
               for key in 'job.workflow_repository' 'job.workflow_sha'; do
                 # No literal dollar-brace-brace here: Actions would parse it as an expression.
@@ -70,13 +81,16 @@ jobs:
   # image, Dependabot owns that file.
   trivy-image:
     name: Trivy image
+    #
+    # This call also covers the opt-out inputs: upload-sarif false and
+    # registry-login left at its default, so the job needs neither the code
+    # scanning nor the package permission, and a non-default timeout-minutes.
     permissions:
-      actions: read
       contents: read
-      packages: read
-      security-events: write
     uses: ./.github/workflows/trivy-image.yml
     with:
+      upload-sarif: false
+      timeout-minutes: 20
       image: gcr.io/distroless/static-debian12
       digest: sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2
 

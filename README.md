@@ -59,13 +59,47 @@ jobs:
     uses: strangebasisdevs/strange_security/.github/workflows/gitleaks.yml@main
 ```
 
-The caller must grant `contents: read` so scans can check out its source and
-`security-events: write` so results can be uploaded to GitHub code scanning.
-Releases and tags (`v1.0.0` and later) are cut from this repository. Consumers
+The caller must grant `contents: read` so scans can check out its source and,
+unless it passes `upload-sarif: false`, `security-events: write` so results can
+be uploaded to GitHub code scanning (private repositories also need
+`actions: read` for the upload). The reusable workflows declare no
+`permissions` block of their own: a called workflow cannot make a permission
+depend on an input, and any permission it declared would have to be granted by
+every caller. The scan job therefore runs with exactly the token the caller
+grants, so keep the caller's default read-only token and add only what the
+inputs you use need. Releases and tags (`v1.0.0` and later) are cut from this repository. Consumers
 pin the reusable workflows by full commit SHA with the release in a comment,
 for example `.../semgrep.yml@<40-hex-sha> # v1.0.0`, and Dependabot moves the
 pin. The `@main` in the examples above is shorthand for that; do not reference
 a branch or tag in a real workflow.
+
+### Inputs
+
+Every reusable workflow takes these two optional inputs:
+
+| Input | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `upload-sarif` | boolean | `true` | Upload the SARIF reports to code scanning. `false` skips every upload step; the caller then needs no `security-events: write`. Use it in private user repositories without code scanning. |
+| `timeout-minutes` | number | `30` | Timeout of the scan job. The first step rejects anything but a whole number from 1 to 360 before any scan runs. |
+
+`trivy-image.yml` adds `image`, `digest` (both required) and `registry-login`
+(boolean, default `false`), described below.
+
+A private repository without code scanning, with a longer timeout:
+
+```yaml
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    uses: strangebasisdevs/strange_security/.github/workflows/semgrep.yml@main
+    with:
+      upload-sarif: false
+      timeout-minutes: 45
+```
+
+The scan still fails the job on findings; only the upload is skipped.
 
 ### Scanning a container image
 
@@ -87,13 +121,11 @@ jobs:
     permissions:
       actions: read
       contents: read
-      packages: read
       security-events: write
     uses: strangebasisdevs/strange_security/.github/workflows/trivy-image.yml@main
     with:
       image: ghcr.io/strangebasisdevs/strange_ringtone
       digest: ${{ needs.publish.outputs.digest }}
-      registry-login: true # only for a private image
 
   tag:
     needs: [publish, scan]
@@ -102,16 +134,17 @@ jobs:
 
 The job is named `Trivy image scan`. The workflow scans exactly
 `image@digest` and rejects an `image` that carries a tag or digest, or a
-`digest` that is not `sha256:` plus 64 hex characters. Public images
-need no login. For a private image pass `registry-login: true`: the workflow
-then runs `docker login ghcr.io` as `github.actor` with the caller's
-`GITHUB_TOKEN` (through stdin, not a third-party action); no secrets are
-passed. Caveat: `trivy-image.yml` still requests `packages: read` at the top
-level of the workflow, whatever `registry-login` is, so every caller must grant
-`packages: read` on the calling job, public image or not, or GitHub rejects the
-call. That will be narrowed in Phase A step 2. Login covers private images
-in the same organisation, provided the calling repository has read access to
-the package.
+`digest` that is not `sha256:` plus 64 hex characters.
+
+Public images need no login, and then the workflow needs no `packages`
+permission and makes no use of `GITHUB_TOKEN` for the registry. For a private
+image pass `registry-login: true` and add `packages: read` to the calling job:
+the workflow then runs `docker login ghcr.io` as `github.actor` with the
+caller's `GITHUB_TOKEN` (through stdin, not a third-party action; no secrets
+are passed). The workflow declares no `packages` permission itself, so the
+token holds it only when the caller grants it. Login covers private images in
+the same organisation, provided the calling repository has read access to the
+package.
 
 Pull requests from forks get a read-only `GITHUB_TOKEN`, so the SARIF upload
 steps fail there even when the scans pass. Do not work around this with
@@ -137,7 +170,7 @@ Trivy runs two scans over the caller's checked-out filesystem:
   without a fix, uploaded to the `trivy` category.
 
 Either scan fails the job. The vulnerability scan still runs when the secret
-scan fails, so both reports are uploaded.
+scan fails, so both reports are uploaded (unless `upload-sarif` is `false`).
 
 ### Trivy image
 
@@ -193,6 +226,11 @@ pull request. They cover:
   step and running it under bash, including multiline inputs;
 - the suppression check in `scripts/check_suppressions.py`, including which
   comment markers count for which file extensions;
+- the `timeout-minutes` validation step of every reusable workflow, extracted
+  and run under bash, and the `upload-sarif`, `timeout-minutes` and
+  `registry-login` wiring in `tests/test_inputs.py` (inputs and defaults, every
+  upload step conditional, no declared `packages` or `security-events`
+  permission, the gate exercising the opt-outs);
 - the structure of the workflow files in `tests/test_workflows.py` (checker
   step ordering, SARIF written to a dedicated directory outside the workspace
   with the source mounted read-only, conditional registry login,
@@ -216,9 +254,13 @@ workflows locally (`./.github/workflows/...`), where the caller and the called
 workflow share one repository. That hides any mix-up between the two, so its
 `contract` job also fails if a reusable workflow reads the caller's
 `github.workflow_*` context or checks out `.strange-security` without
-`job.workflow_repository` and `job.workflow_sha`.
+`job.workflow_repository` and `job.workflow_sha`, or declares a `permissions`
+block or a `packages` or `security-events` permission (callers would have to
+grant it even when unused).
 
 The gate also calls `trivy-image.yml` on the digest-pinned public image
 `gcr.io/distroless/static-debian12`, so every reusable workflow runs on every
-pull request. That image is not tied to `scanner-images/trivy.Dockerfile`;
+pull request, with `upload-sarif: false` and a non-default `timeout-minutes`
+so those inputs run too, and with no `packages` or `security-events` grant. That
+image is not tied to `scanner-images/trivy.Dockerfile`;
 refresh its digest in `security_gate.yml` by hand.

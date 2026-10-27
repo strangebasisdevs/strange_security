@@ -3,6 +3,20 @@ name: Trivy image
 on:
   workflow_call:
     inputs:
+      upload-sarif:
+        description: >-
+          Upload the SARIF reports to GitHub code scanning. Set false for a
+          private repository without code scanning; the caller then does not
+          need security-events write.
+        required: false
+        default: true
+        type: boolean
+      timeout-minutes:
+        description: >-
+          Timeout for the scan job, a whole number of minutes from 1 to 360.
+        required: false
+        default: 30
+        type: number
       image:
         description: Image reference without tag or digest, e.g. ghcr.io/strangebasisdevs/strange_ringtone
         required: true
@@ -15,23 +29,37 @@ on:
         description: >-
           Log in to ghcr.io as github.actor with the caller's GITHUB_TOKEN
           before pulling, for private images. The caller must then grant
-          packages read. Leave false for public images.
+          packages read on the calling job. Leave false for public images:
+          nothing then reads GITHUB_TOKEN for the registry and the caller
+          needs no packages permission.
         required: false
         default: false
         type: boolean
 
-permissions:
-  actions: read
-  contents: read
-  packages: read
-  security-events: write
+# No permissions block, on purpose. A called workflow can only keep or reduce
+# the token the caller grants, and it cannot make a permission depend on an
+# input, so declaring security-events: write here would force every caller to
+# grant it even with upload-sarif: false. The job runs with exactly what the
+# caller grants. Grant contents: read always, and security-events: write (plus
+# actions: read in a private repository) only when upload-sarif is true.
 
 jobs:
   trivy-image:
     name: Trivy image scan
     runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
 
     steps:
+      # Fails before any checkout or scan on a timeout the job cannot honour.
+      - name: Validate timeout
+        env:
+          TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+        run: |
+          if [[ ! "$TIMEOUT_MINUTES" =~ ^[1-9][0-9]{0,2}$ ]] || (( TIMEOUT_MINUTES > 360 )); then
+            echo "::error::timeout-minutes must be a whole number from 1 to 360"
+            exit 1
+          fi
+
       # Scan exactly image@digest, never a tag, so the caller can push
       # untagged, scan, and tag only on pass.
       - name: Validate image reference
@@ -104,7 +132,10 @@ jobs:
 
       # Optional, for private images only. Uses the docker CLI rather than a
       # third-party action. The token reaches docker through stdin from an
-      # environment variable, never a command-line argument.
+      # environment variable, never a command-line argument. The token is
+      # referenced only in this step, so with registry-login off it is never
+      # evaluated. This workflow declares no packages permission: the token
+      # holds packages: read only if the calling job granted it.
       - name: Log in to GitHub Container Registry
         if: ${{ inputs.registry-login }}
         env:
@@ -153,14 +184,14 @@ jobs:
       # Categories carry the image name, so a caller that scans several images
       # keeps one code scanning run per image instead of overwriting them.
       - name: Upload secret scan SARIF
-        if: always()
+        if: ${{ always() && inputs.upload-sarif }}
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: trivy-image-secret.sarif
           category: trivy-image-secret/${{ inputs.image }}
 
       - name: Upload vulnerability scan SARIF
-        if: always()
+        if: ${{ always() && inputs.upload-sarif }}
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: trivy-image-vuln.sarif
