@@ -6,8 +6,8 @@ on:
       upload-sarif:
         description: >-
           Upload the SARIF reports to GitHub code scanning. Set false for a
-          private repository without code scanning; the caller then does not
-          need security-events write.
+          private repository without code scanning. The caller still grants
+          security-events write, which the permissions cap below requires.
         required: false
         default: true
         type: boolean
@@ -18,12 +18,15 @@ on:
         default: 30
         type: number
 
-# No permissions block, on purpose. A called workflow can only keep or reduce
-# the token the caller grants, and it cannot make a permission depend on an
-# input, so declaring security-events: write here would force every caller to
-# grant it even with upload-sarif: false. The job runs with exactly what the
-# caller grants. Grant contents: read always, and security-events: write (plus
-# actions: read in a private repository) only when upload-sarif is true.
+# Declared cap. A called workflow can only keep or reduce the token the caller
+# grants, and it cannot make a permission depend on an input, so this cap is
+# fixed: callers grant contents: read, actions: read and security-events: write,
+# also with upload-sarif: false. packages is deliberately absent, so
+# GITHUB_TOKEN cannot read private GHCR packages (see registry-login).
+permissions:
+  actions: read
+  contents: read
+  security-events: write
 
 jobs:
   gitleaks:

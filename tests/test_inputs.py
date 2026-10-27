@@ -23,6 +23,39 @@ def input_block(text, name):
     return match.group(1)
 
 
+def declared_permissions(text):
+    """The permissions block as {scope: level}; empty when there is none."""
+    match = re.search(r"(?m)^\s*permissions:[ \t]*\n((?:[ \t]+[a-z-]+:[ \t]*\w+[ \t]*(?:#.*)?\n)+)", text)
+    if not match:
+        return {}
+    return dict(re.findall(r"([a-z-]+):[ \t]*(\w+)", match.group(1)))
+
+
+def permission_count(text):
+    return len(re.findall(r"(?m)^\s*permissions:", text))
+
+
+def expected_cap(text):
+    """actions and contents read, plus security-events write where SARIF is uploaded."""
+    cap = {"actions": "read", "contents": "read"}
+    if "upload-sarif@" in text:
+        cap["security-events"] = "write"
+    return cap
+
+
+def cap_problems(text):
+    """What is wrong with a workflow's permissions cap; empty when it is exact."""
+    problems = []
+    if permission_count(text) != 1:
+        problems.append("not exactly one permissions block")
+    if declared_permissions(text) != expected_cap(text):
+        problems.append("cap differs from the expected one")
+    return problems
+
+
+FULL_CAP = "permissions:\n  actions: read\n  contents: read\n  security-events: write\n\njobs:\n  a:\n    uses: x\n"
+
+
 class Inputs(unittest.TestCase):
     def test_every_reusable_workflow_has_the_common_inputs(self):
         self.assertEqual(len(scan_workflows()), 4)
@@ -59,23 +92,68 @@ class Inputs(unittest.TestCase):
                     self.assertIn("if: ${{ always() && inputs.upload-sarif }}", m.group(2), m.group(1))
                 self.assertEqual(len(steps), text.count("upload-sarif@"))
 
-    def test_no_permission_that_forces_callers_to_grant_it(self):
+    def test_each_workflow_declares_exactly_the_permissions_cap(self):
         for name in scan_workflows():
             text = read(name)
             with self.subTest(workflow=name):
-                self.assertNotRegex(text, r"(?m)^\s*permissions:")
-                self.assertNotRegex(text, r"(?m)^\s*(packages|security-events):\s*(read|write|none)")
+                self.assertEqual(cap_problems(text), [])
+                self.assertNotIn("packages", declared_permissions(text))
+                self.assertEqual(declared_permissions(text)["security-events"], "write")
+                self.assertNotRegex(text, r"(?m)^\s*packages:")
+
+    def test_cap_check_rejects_missing_extra_and_write_permissions(self):
+        sarif = "uses: github/codeql-action/upload-sarif@x\n"
+        self.assertEqual(cap_problems(FULL_CAP + sarif), [])
+        bad = {
+            "missing block": "jobs:\n  a:\n    uses: x\n" + sarif,
+            "missing actions": FULL_CAP.replace("  actions: read\n", ""),
+            "write contents": FULL_CAP.replace("contents: read", "contents: write"),
+            "write actions": FULL_CAP.replace("actions: read", "actions: write"),
+            "read security-events": FULL_CAP.replace("security-events: write", "security-events: read"),
+            "packages": FULL_CAP.replace("\n\njobs", "  packages: read\n\njobs"),
+            "extra write": FULL_CAP.replace("\n\njobs", "  id-token: write\n\njobs"),
+            "job-level block": FULL_CAP + "    permissions:\n      contents: read\n",
+        }
+        for label, text in bad.items():
+            with self.subTest(case=label):
+                self.assertNotEqual(cap_problems(text + sarif), [])
+        # Without a SARIF upload the cap would not include security-events.
+        self.assertNotEqual(cap_problems(FULL_CAP), [])
+
+    def test_gate_contract_job_requires_the_cap(self):
+        gate = read("security_gate.yml")
+        job = gate[gate.index("  contract:"):gate.index("  semgrep:")]
+        self.assertIn("expected='actions: read,contents: read,'", job)
+        self.assertIn("security-events: write,", job)
+        self.assertIn("upload-sarif@", job)
+        self.assertNotIn("forces callers", job)
+        self.assertNotIn("declare no permissions", job)
 
     def test_gate_exercises_the_opt_out_inputs(self):
         gate = read("security_gate.yml")
-        self.assertRegex(gate, r"upload-sarif:\s*false\b")
-        match = re.search(r"timeout-minutes:\s*(\d+)\s*\n", gate)
+        start = gate.index("\n  trivy-image:\n")
+        end = gate.index("\n  tests:\n")
+        job = gate[start:end]
+        # Comments are not configuration: only real keys of this job count.
+        code = "\n".join(line for line in job.splitlines() if not line.lstrip().startswith("#"))
+        self.assertRegex(code, r"(?m)^      upload-sarif:[ \t]*false[ \t]*$")
+        match = re.search(r"(?m)^      timeout-minutes:[ \t]*(\d+)[ \t]*$", code)
         self.assertTrue(match)
         self.assertNotEqual(match.group(1), "30")
-        job = gate[gate.index("  trivy-image:"):gate.index("  tests:")]
-        self.assertNotIn("security-events", job)
-        self.assertNotIn("packages", job)
-        self.assertNotIn("registry-login:", job)
+        self.assertNotIn("registry-login", code)
+        # The called workflow keeps its cap, so the call grants all of it even with upload-sarif: false.
+        self.assertEqual(declared_permissions(code), {"actions": "read", "contents": "read", "security-events": "write"})
+        self.assertNotIn("packages", code)
+        # Every other call inherits the gate's top-level grant, which must cover the cap.
+        top = gate[gate.index("\npermissions:"):gate.index("\njobs:")].lstrip("\n")
+        self.assertEqual(declared_permissions(top + "\n"), {"actions": "read", "contents": "read", "security-events": "write"})
+
+    def test_gate_opt_out_comment_does_not_satisfy_the_job_assertions(self):
+        gate = read("security_gate.yml")
+        job = gate[gate.index("\n  trivy-image:\n"):gate.index("\n  tests:\n")]
+        comments = "\n".join(l for l in job.splitlines() if l.lstrip().startswith("#"))
+        self.assertNotRegex(comments, r"upload-sarif:\s*false")
+        self.assertNotRegex(comments, r"timeout-minutes:\s*\d")
 
     def test_login_is_the_only_token_use_and_avoids_login_action(self):
         text = read("trivy-image.yml")

@@ -36,15 +36,20 @@ jobs:
               echo "::error file=$file::uses the caller's github.workflow_* context; use job.workflow_repository and job.workflow_sha"
               status=1
             fi
-            # Called workflows declare no permissions block: the job runs with what
-            # the caller grants, so upload-sarif: false and a login-free image scan
-            # need no security-events or packages permission.
-            if grep -nE '^permissions:' "$file"; then
-              echo "::error::declares top-level permissions, which forces callers to grant them even when unused"
+            # Each reusable workflow declares a permissions cap: exactly actions: read
+            # and contents: read, plus security-events: write when it uploads SARIF.
+            # No packages, no other read or write, and no second block in a job.
+            if [ "$(grep -cE '^[[:space:]]*permissions:' "$file")" != 1 ]; then
+              echo "::error file=$file::must declare exactly one top-level permissions block and no job-level one"
               status=1
             fi
-            if grep -nE '^[[:space:]]*(packages|security-events):[[:space:]]*(read|write|none)' "$file"; then
-              echo "::error::declares a packages or security-events permission"
+            declared=$(tr -d '\r' < "$file" | awk '/^permissions:/ {f=1; next} f && /^[^[:space:]#]/ {f=0} f && /^[[:space:]]+[a-z-]+:/ {sub(/^[[:space:]]+/, ""); sub(/[[:space:]]*(#.*)?$/, ""); print}' | sort | tr '\n' ',')
+            expected='actions: read,contents: read,'
+            if grep -q 'upload-sarif@' "$file"; then
+              expected="${expected}security-events: write,"
+            fi
+            if [ "$declared" != "$expected" ]; then
+              echo "::error file=$file::permissions cap is '$declared', expected '$expected'"
               status=1
             fi
             if grep -q '\.strange-security' "$file"; then
@@ -82,11 +87,13 @@ jobs:
   trivy-image:
     name: Trivy image
     #
-    # This call also covers the opt-out inputs: upload-sarif false and
-    # registry-login left at its default, so the job needs neither the code
-    # scanning nor the package permission, and a non-default timeout-minutes.
+    # This call also exercises the opt-out inputs below. The called workflow
+    # keeps its fixed permissions cap, so this call grants the full cap even
+    # though no SARIF is uploaded.
     permissions:
+      actions: read
       contents: read
+      security-events: write
     uses: ./.github/workflows/trivy-image.yml
     with:
       upload-sarif: false
