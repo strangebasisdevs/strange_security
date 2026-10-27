@@ -39,7 +39,7 @@ jobs:
             # Each reusable workflow declares a permissions cap: exactly actions: read
             # and contents: read, plus security-events: write when it uploads SARIF.
             # No packages, no other read or write, and no second block in a job.
-            if [ "$(grep -cE '^[[:space:]]*permissions:' "$file")" != 1 ]; then
+            if [ "$(grep -cE '^[[:space:]]*["'"'"']?permissions["'"'"']?[[:space:]]*:' "$file")" != 1 ]; then
               echo "::error file=$file::must declare exactly one top-level permissions block and no job-level one"
               status=1
             fi
@@ -53,9 +53,9 @@ jobs:
                 id = "[A-Za-z-]+"
                 tok = "(\042" id "\042|\047" id "\047|" id ")"
               }
-              /^permissions:/ {
+              /^[\042\047]?permissions[\042\047]?[ \t]*:/ {
                 f = 1; r = $0
-                sub(/^permissions:/, "", r); sub(/^[ \t]+/, "", r)
+                sub(/^[\042\047]?permissions[\042\047]?[ \t]*:/, "", r); sub(/^[ \t]+/, "", r)
                 sub(/^#.*/, "", r); sub(/[ \t]+#.*$/, "", r); sub(/[ \t]+$/, "", r)
                 if (r != "") print "INLINE " r
                 next

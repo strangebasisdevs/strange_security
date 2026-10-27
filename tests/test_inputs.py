@@ -24,6 +24,10 @@ def input_block(text, name):
     return match.group(1)
 
 
+# A permissions key in any spelling: bare, "double" or 'single' quoted, with
+# spaces or tabs before the colon. Group 1 is the indent. Quotes are matched
+# loosely on purpose, so a mismatched pair still counts and fails closed.
+_KEY = r"^([ \t]*)[\"']?permissions[\"']?[ \t]*:"
 _ID = r"[A-Za-z-]+"
 _TOKEN = r"(?:\"%s\"|'%s'|%s)" % (_ID, _ID, _ID)
 _ENTRY = re.compile(r"^(%s)[ \t]*:[ \t]+(%s)$" % (_TOKEN, _TOKEN))
@@ -44,7 +48,7 @@ def parse_permissions(text):
     lines = text.replace("\r", "").split("\n")
     entries, errors = [], []
     for i, line in enumerate(lines):
-        match = re.match(r"^([ \t]*)permissions:(.*)$", line)
+        match = re.match(_KEY + r"(.*)$", line)
         if not match:
             continue
         indent = len(match.group(1))
@@ -72,7 +76,7 @@ def declared_permissions(text):
 
 
 def permission_count(text):
-    return len(re.findall(r"(?m)^\s*permissions:", text))
+    return len(re.findall(_KEY, text, re.M))
 
 
 def expected_cap(text):
@@ -100,6 +104,10 @@ def cap_problems(text):
 FULL_CAP = "permissions:\n  actions: read\n  contents: read\n  security-events: write\n\njobs:\n  a:\n    uses: x\n"
 
 
+def _in_job(extra):
+    return FULL_CAP.replace("    uses: x\n", "    " + extra + "\n    uses: x\n")
+
+
 def _with_extra(extra):
     return FULL_CAP.replace("\n\njobs", "\n" + extra + "\n\njobs")
 
@@ -115,12 +123,20 @@ MUTATIONS = {
     "read-all": "permissions: read-all # all\n\njobs:\n  a:\n    uses: x\n",
     "duplicate key": _with_extra("  contents: read"),
     "unparsable line": _with_extra("  issues write"),
+    "job-level double-quoted key": _in_job('"permissions": write-all'),
+    "job-level single-quoted key": _in_job("'permissions': write-all"),
+    "job-level key with space before colon": _in_job("permissions : write-all"),
+    "job-level key with tab before colon": _in_job("permissions\t: write-all"),
+    "second column-0 quoted key": _with_extra('"permissions":\n  issues: write'),
+    "second column-0 key with space": _with_extra("permissions :\n  issues: write"),
     "quoted value": FULL_CAP.replace("contents: read", 'contents: "write"'),
 }
 # Valid spellings of the exact cap.
 ACCEPTED = {
     "trailing comments": FULL_CAP.replace("actions: read", "actions: read # needed").replace("write\n", "write   # sarif\n"),
     "quoted keys and values": FULL_CAP.replace("actions: read", "\"actions\": 'read'").replace("contents: read", "'contents': \"read\""),
+    "column-0 double-quoted key": FULL_CAP.replace("permissions:", '"permissions":', 1),
+    "column-0 key with space before colon": FULL_CAP.replace("permissions:", "permissions :", 1),
     "blank and comment lines inside": FULL_CAP.replace("  contents", "\n  # c\n  contents"),
 }
 
