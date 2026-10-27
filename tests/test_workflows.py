@@ -76,7 +76,7 @@ class Workflows(unittest.TestCase):
         self.assertGreater(check, text.index("name: Upload SARIF results"))
         self.assertIn("if: always()", text[check:text.index("run:", check)])
         upload = text.index("name: Upload SARIF results")
-        self.assertIn("if: always()", text[upload:text.index("uses:", upload)])
+        self.assertIn("if: ${{ always() && inputs.upload-sarif }}", text[upload:text.index("uses:", upload)])
 
     def test_semgrep_checker_step_is_not_continue_on_error(self):
         text = read("semgrep.yml")
