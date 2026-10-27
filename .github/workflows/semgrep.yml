@@ -22,7 +22,7 @@ on:
 # grants, and it cannot make a permission depend on an input, so this cap is
 # fixed: callers grant contents: read, actions: read and security-events: write,
 # also with upload-sarif: false. packages is deliberately absent, so
-# GITHUB_TOKEN cannot read private GHCR packages (see registry-login).
+# GITHUB_TOKEN cannot read private GHCR packages.
 permissions:
   actions: read
   contents: read

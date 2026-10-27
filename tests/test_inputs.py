@@ -143,7 +143,7 @@ ACCEPTED = {
 
 class Inputs(unittest.TestCase):
     def test_every_reusable_workflow_has_the_common_inputs(self):
-        self.assertEqual(len(scan_workflows()), 4)
+        self.assertEqual(len(scan_workflows()), 5)
         for name in scan_workflows():
             text = read(name)
             with self.subTest(workflow=name):
@@ -221,42 +221,75 @@ class Inputs(unittest.TestCase):
         self.assertNotIn("forces callers", job)
         self.assertNotIn("declare no permissions", job)
 
+    def gate_job(self, name):
+        """One job of the security gate, from its key to the next job."""
+        gate = read("security_gate.yml")
+        start = gate.index("\n  %s:\n" % name)
+        end = re.search(r"\n  [\w-]+:\n", gate[start + 1:])
+        return gate[start:start + 1 + end.start()] if end else gate[start:]
+
     def test_gate_exercises_the_opt_out_inputs(self):
         gate = read("security_gate.yml")
-        start = gate.index("\n  trivy-image:\n")
-        end = gate.index("\n  tests:\n")
-        job = gate[start:end]
-        # Comments are not configuration: only real keys of this job count.
-        code = "\n".join(line for line in job.splitlines() if not line.lstrip().startswith("#"))
-        self.assertRegex(code, r"(?m)^      upload-sarif:[ \t]*false[ \t]*$")
-        match = re.search(r"(?m)^      timeout-minutes:[ \t]*(\d+)[ \t]*$", code)
-        self.assertTrue(match)
-        self.assertNotEqual(match.group(1), "30")
-        self.assertNotIn("registry-login", code)
-        # The called workflow keeps its cap, so the call grants all of it even with upload-sarif: false.
-        self.assertEqual(declared_permissions(code), {"actions": "read", "contents": "read", "security-events": "write"})
-        self.assertNotIn("packages", code)
+        for name in ("trivy-image", "trivy-images"):
+            job = self.gate_job(name)
+            with self.subTest(job=name):
+                # Comments are not configuration: only real keys of this job count.
+                code = "\n".join(line for line in job.splitlines() if not line.lstrip().startswith("#"))
+                self.assertRegex(code, r"(?m)^      upload-sarif:[ \t]*false[ \t]*$")
+                match = re.search(r"(?m)^      timeout-minutes:[ \t]*(\d+)[ \t]*$", code)
+                self.assertTrue(match)
+                self.assertNotEqual(match.group(1), "30")
+                self.assertNotIn("registry-login", code)
+                self.assertNotIn("registry-token", code)
+                # The called workflow keeps its cap, so the call grants all of it even with upload-sarif: false.
+                self.assertEqual(declared_permissions(code), {"actions": "read", "contents": "read", "security-events": "write"})
+                self.assertNotIn("packages", code)
         # Every other call inherits the gate's top-level grant, which must cover the cap.
         top = gate[gate.index("\npermissions:"):gate.index("\njobs:")].lstrip("\n")
         self.assertEqual(declared_permissions(top + "\n"), {"actions": "read", "contents": "read", "security-events": "write"})
 
-    def test_gate_opt_out_comment_does_not_satisfy_the_job_assertions(self):
-        gate = read("security_gate.yml")
-        job = gate[gate.index("\n  trivy-image:\n"):gate.index("\n  tests:\n")]
-        comments = "\n".join(l for l in job.splitlines() if l.lstrip().startswith("#"))
-        self.assertNotRegex(comments, r"upload-sarif:\s*false")
-        self.assertNotRegex(comments, r"timeout-minutes:\s*\d")
+    def test_gate_scans_two_public_images_pinned_by_digest(self):
+        job = self.gate_job("trivy-images")
+        code = "\n".join(l for l in job.splitlines() if not l.lstrip().startswith("#"))
+        images = re.search(r"(?m)^      images: \|\n((?:        .*\n?)+)", code).group(1).split()
+        self.assertGreaterEqual(len(images), 2)
+        for ref in images:
+            with self.subTest(image=ref):
+                self.assertRegex(ref, r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
+        self.assertEqual(len({r.split("@")[0] for r in images}), len(images))
+        # The dated comment above the job says when the digests were resolved.
+        self.assertRegex(read("security_gate.yml"), r"resolved from the registry\s+#\s+API on 20\d\d-\d\d-\d\d")
 
-    def test_login_is_the_only_token_use_and_avoids_login_action(self):
-        text = read("trivy-image.yml")
-        self.assertNotIn("docker/login-action", text)
-        self.assertEqual(text.count("secrets.GITHUB_TOKEN"), 1)
-        self.assertEqual(len(re.findall(r"github\.token", text)), 0)
-        login = text[text.index("- name: Log in to GitHub Container Registry"):]
-        login = login[:login.index("run:")]
-        self.assertIn("secrets.GITHUB_TOKEN", login)
-        self.assertIn("if: ${{ inputs.registry-login }}", login)
-        self.assertRegex(input_block(text, "registry-login"), r"default:\s*false\b")
+    def test_gate_opt_out_comment_does_not_satisfy_the_job_assertions(self):
+        for name in ("trivy-image", "trivy-images"):
+            job = self.gate_job(name)
+            comments = chr(10).join(l for l in job.splitlines() if l.lstrip().startswith("#"))
+            with self.subTest(job=name):
+                self.assertNotRegex(comments, r"upload-sarif:\s*false")
+                self.assertNotRegex(comments, r"timeout-minutes:\s*\d")
+
+    def test_login_uses_the_registry_token_secret_and_nothing_else(self):
+        for name in ("trivy-image.yml", "trivy-images.yml"):
+            text = read(name)
+            with self.subTest(workflow=name):
+                self.assertNotIn("docker/login-action", text)
+                # Comments and descriptions may name GITHUB_TOKEN; no expression may use it.
+                self.assertNotRegex(text, r"secrets\.GITHUB_TOKEN")
+                self.assertEqual(len(re.findall(r"github\.token", text)), 0)
+                self.assertEqual(text.count("secrets.registry-token"), 1)
+                login = text[text.index("- name: Log in to GitHub Container Registry"):]
+                login = login[:login.index("run:")]
+                self.assertIn("secrets.registry-token", login)
+                self.assertIn("if: ${{ inputs.registry-login }}", login)
+                self.assertRegex(input_block(text, "registry-login"), r"default:\s*false\b")
+                secrets = text[text.index("    secrets:\n"):text.index("\n# Declared cap")]
+                self.assertRegex(secrets, r"(?m)^      registry-token:\n")
+                self.assertRegex(secrets, r"required:\s*false\b")
+
+    def test_only_the_image_workflows_take_the_secret(self):
+        for name in scan_workflows():
+            with self.subTest(workflow=name):
+                self.assertEqual("    secrets:\n" in read(name), name in ("trivy-image.yml", "trivy-images.yml"))
 
 
 @unittest.skipUnless(BASH, "bash is required")

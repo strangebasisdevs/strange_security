@@ -164,11 +164,45 @@ class Workflows(unittest.TestCase):
         self.assertEqual(called, set(names) - {"security_gate.yml"})
 
     def test_registry_login_defaults_to_false(self):
-        text = read("trivy-image.yml")
-        block = text[text.index("registry-login:"):]
-        block = block[:block.index("type:")]
-        self.assertRegex(block, r"default:\s*false\b")
-        self.assertRegex(block, r"required:\s*false\b")
+        for name in ("trivy-image.yml", "trivy-images.yml"):
+            text = read(name)
+            block = text[text.index("registry-login:"):]
+            block = block[:block.index("type:")]
+            with self.subTest(workflow=name):
+                self.assertRegex(block, r"default:\s*false\b")
+                self.assertRegex(block, r"required:\s*false\b")
+
+    # A full 40-hex commit SHA, or a local reusable workflow of this repository.
+    PINNED = re.compile(r"^[A-Za-z0-9][\w-]*/[\w.-]+(?:/[\w./-]+)?@[0-9a-f]{40}$")
+    LOCAL = re.compile(r"^\./\.github/workflows/[\w.-]+\.yml$")
+
+    def test_every_action_is_pinned_to_a_full_sha_with_a_release_comment(self):
+        # The gate calls this repository's own reusable workflows by path, the only
+        # unpinned reference allowed, and only in the gate.
+        seen = 0
+        for path in sorted(glob.glob(os.path.join(WORKFLOWS, "*.yml"))):
+            name = os.path.basename(path)
+            for number, line in enumerate(read(name).split("\n"), 1):
+                match = re.match(r"^\s*(?:-\s+)?[\"']?uses[\"']?\s*:\s*(\S+)(.*)$", line)
+                if not match:
+                    continue
+                seen += 1
+                ref, rest = match.group(1), match.group(2)
+                where = "%s:%d: %s" % (name, number, line.strip())
+                if self.LOCAL.match(ref):
+                    self.assertEqual(name, "security_gate.yml", where)
+                    continue
+                self.assertRegex(ref, self.PINNED, where)
+                self.assertRegex(rest, r"^\s+# v\d+\.\d+\.\d+\s*$", where)
+        self.assertGreater(seen, 10)
+
+    def test_pin_check_notices_mutable_references(self):
+        for ref in ("actions/checkout@main", "actions/checkout@v4", "actions/checkout@3d3c42e", "actions/checkout",
+                    "actions/checkout@" + "G" * 40, "actions/checkout@" + "a" * 41, "./local@" + "a" * 40,
+                    "docker://alpine:3"):
+            with self.subTest(ref=ref):
+                self.assertIsNone(self.PINNED.match(ref))
+        self.assertIsNotNone(self.PINNED.match("github/codeql-action/upload-sarif@" + "a" * 40))
 
     def test_gate_image_is_pinned_by_digest(self):
         gate = read("security_gate.yml")
