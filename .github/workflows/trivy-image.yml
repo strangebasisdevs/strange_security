@@ -27,20 +27,25 @@ on:
         type: string
       registry-login:
         description: >-
-          Log in to ghcr.io as github.actor with the caller's GITHUB_TOKEN
-          before pulling, for private images. The permissions cap has no packages
-          read, so GITHUB_TOKEN cannot read private GHCR packages; the login
-          only helps where the token can already pull the image. Leave false
-          for public images: nothing then reads GITHUB_TOKEN for the registry.
+          Log in to ghcr.io with the registry-token secret before pulling, for
+          private images. The job fails if this is true and the secret is
+          empty. GITHUB_TOKEN is not used: the permissions cap has no packages
+          read. Leave false for public images, which need no login.
         required: false
         default: false
         type: boolean
+    secrets:
+      registry-token:
+        description: >-
+          Read-only package token for ghcr.io (a personal access token (classic) with
+          read:packages; GitHub Packages only supports classic tokens). Only used when registry-login is true. Not GITHUB_TOKEN.
+        required: false
 
 # Declared cap. A called workflow can only keep or reduce the token the caller
 # grants, and it cannot make a permission depend on an input, so this cap is
 # fixed: callers grant contents: read, actions: read and security-events: write,
-# also with upload-sarif: false. packages is deliberately absent, so
-# GITHUB_TOKEN cannot read private GHCR packages (see registry-login).
+# also with upload-sarif: false. packages is deliberately absent: GITHUB_TOKEN
+# never reads private GHCR packages here, the registry-token secret does.
 permissions:
   actions: read
   contents: read
@@ -135,16 +140,23 @@ jobs:
 
       # Optional, for private images only. Uses the docker CLI rather than a
       # third-party action. The token reaches docker through stdin from an
-      # environment variable, never a command-line argument. The token is
-      # referenced only in this step, so with registry-login off it is never
-      # evaluated. This workflow declares no packages permission: the token
-      # holds packages: read only if the calling job granted it.
+      # environment variable, never a command-line argument, and is referenced
+      # only in this step, so with registry-login off it is never evaluated.
+      # It is the caller's registry-token secret, not GITHUB_TOKEN (the
+      # permissions cap above has no packages permission, so GITHUB_TOKEN can
+      # never read a private package here), and an empty one is an error
+      # rather than an anonymous login.
       - name: Log in to GitHub Container Registry
         if: ${{ inputs.registry-login }}
         env:
           REGISTRY_USER: ${{ github.actor }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          REGISTRY_TOKEN: ${{ secrets.registry-token }}
+        run: |
+          if [ -z "$REGISTRY_TOKEN" ]; then
+            echo "::error::registry-login is true but the registry-token secret is empty; pass a read-only package token as registry-token"
+            exit 1
+          fi
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
 
       # Pulled by the runner's Docker daemon, which holds any login, and handed
       # to Trivy through the socket so Trivy never sees the credentials.

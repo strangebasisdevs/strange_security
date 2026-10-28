@@ -1,0 +1,306 @@
+name: Trivy images
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: >-
+          Images to scan, one reference per line: repo:tag, repo@sha256:...
+          or repo:tag@sha256:... (a digest is best, a tag can move). At most
+          20, each repository listed once. Anything else fails before any scan.
+        required: true
+        type: string
+      exceptions-file:
+        description: >-
+          Path of the image exceptions file in the caller's repository. Not
+          supported until the exception engine release: a file that exists and
+          is not empty fails the job instead of being ignored.
+        required: false
+        default: .github/image-exceptions.json
+        type: string
+      upload-sarif:
+        description: >-
+          Upload the SARIF reports to GitHub code scanning. Set false for a
+          private repository without code scanning. The caller still grants
+          security-events write, which the permissions cap below requires.
+        required: false
+        default: true
+        type: boolean
+      timeout-minutes:
+        description: >-
+          Timeout for each image scan job, a whole number of minutes from 1 to
+          360.
+        required: false
+        default: 30
+        type: number
+      registry-login:
+        description: >-
+          Log in to ghcr.io with the registry-token secret before pulling, for
+          private images. The job fails if this is true and the secret is
+          empty. Leave false for public images.
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      registry-token:
+        description: >-
+          Read-only package token for ghcr.io (a personal access token (classic) with
+          read:packages; GitHub Packages only supports classic tokens). Only used when registry-login is true. Not GITHUB_TOKEN.
+        required: false
+
+# Declared cap. A called workflow can only keep or reduce the token the caller
+# grants, and it cannot make a permission depend on an input, so this cap is
+# fixed: callers grant contents: read, actions: read and security-events: write,
+# also with upload-sarif: false. packages is deliberately absent: GITHUB_TOKEN
+# never reads private GHCR packages here, the registry-token secret does.
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  # Validates the inputs and turns the image list into a matrix, so each image
+  # is scanned, gated and uploaded to its own code scanning category.
+  plan:
+    name: Plan image scans
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+
+    steps:
+      # Fails before any checkout or scan on a timeout the scan jobs cannot honour.
+      - name: Validate timeout
+        env:
+          TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+        run: |
+          if [[ ! "$TIMEOUT_MINUTES" =~ ^[1-9][0-9]{0,2}$ ]] || (( TIMEOUT_MINUTES > 360 )); then
+            echo "::error::timeout-minutes must be a whole number from 1 to 360"
+            exit 1
+          fi
+
+      # In a called workflow the github context belongs to the caller, so
+      # github.workflow_ref names the caller's workflow. job.workflow_repository
+      # and job.workflow_sha name this file's own repository and commit. Fail
+      # if they are empty: actions/checkout would silently fall back to the caller.
+      - name: Resolve shared workflow source
+        id: shared
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_repository or job.workflow_sha is empty"
+            exit 1
+          fi
+          echo "repository=$WORKFLOW_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
+      # The validation script lives in this workflow's repository, so check it
+      # out at the exact commit this workflow file came from.
+      - name: Checkout shared workflow repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.shared.outputs.repository }}
+          ref: ${{ steps.shared.outputs.sha }}
+          path: .strange-security
+          persist-credentials: false
+
+      - name: Verify shared workflow checkout
+        env:
+          WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
+        run: |
+          test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
+          test -f .strange-security/scripts/trivy_images.py
+
+      # The inputs reach the script only through the environment, never the
+      # shell command line, and python3 -I ignores the caller's environment.
+      - name: Validate images
+        id: plan
+        env:
+          IMAGES: ${{ inputs.images }}
+          EXCEPTIONS_FILE: ${{ inputs.exceptions-file }}
+        run: python3 -I .strange-security/scripts/trivy_images.py plan
+
+  scan:
+    name: Trivy image scan (${{ matrix.repository }})
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+
+    steps:
+      # Checked out so the exceptions file can be looked up, and so the SARIF
+      # upload has the caller's source to link results to.
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve shared workflow source
+        id: shared
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_repository or job.workflow_sha is empty"
+            exit 1
+          fi
+          echo "repository=$WORKFLOW_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile and the gate script live in this workflow's repository,
+      # so check it out at the exact commit this workflow file came from.
+      - name: Checkout shared workflow repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.shared.outputs.repository }}
+          ref: ${{ steps.shared.outputs.sha }}
+          path: .strange-security
+          persist-credentials: false
+
+      - name: Verify shared workflow checkout
+        env:
+          WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
+        run: |
+          test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
+          test -d .strange-security/scanner-images
+          test -f .strange-security/scripts/trivy_images.py
+
+      # Image version lives in scanner-images/trivy.Dockerfile, the single spot Dependabot updates.
+      - name: Build Trivy image
+        run: |
+          docker build \
+            --file .strange-security/scanner-images/trivy.Dockerfile \
+            --tag trivy-scanner \
+            .strange-security
+
+      # Optional, for private images only. Uses the docker CLI rather than a
+      # third-party action. The token reaches docker through stdin from an
+      # environment variable, never a command-line argument, and is referenced
+      # only in this step, so with registry-login off it is never evaluated.
+      # It is the caller's registry-token secret, not GITHUB_TOKEN, and an
+      # empty one is an error rather than an anonymous login.
+      - name: Log in to GitHub Container Registry
+        if: ${{ inputs.registry-login }}
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.registry-token }}
+        run: |
+          if [ -z "$REGISTRY_TOKEN" ]; then
+            echo "::error::registry-login is true but the registry-token secret is empty; pass a read-only package token as registry-token"
+            exit 1
+          fi
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+
+      # Pulled by the runner's Docker daemon, which holds any login, and handed
+      # to Trivy through the socket so Trivy never sees the credentials.
+      - name: Pull image
+        id: pull
+        env:
+          REFERENCE: ${{ matrix.reference }}
+        run: docker pull "$REFERENCE"
+
+      # Trivy runs in an empty working directory, not the caller's checkout, so
+      # a caller's .trivyignore or trivy.yaml cannot suppress a finding here.
+      - name: Prepare scan directories
+        run: mkdir -p "$RUNNER_TEMP/trivy-images/out" "$RUNNER_TEMP/trivy-images/cache"
+
+      # The JSON reports are unfiltered and exit 0: the gate script decides.
+      # Unfiltered by severity also for secrets: some built-in secret rules
+      # are below HIGH, and any secret fails.
+      - name: Run Trivy secret scan
+        env:
+          REFERENCE: ${{ matrix.reference }}
+        run: |
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$RUNNER_TEMP/trivy-images/cache:/cache" \
+            --volume "$RUNNER_TEMP/trivy-images/out:/out" \
+            --workdir /out \
+            trivy-scanner \
+            image --cache-dir /cache --image-src docker --scanners secret \
+            --format json --output /out/secret.json --exit-code 0 \
+            "$REFERENCE"
+
+      - name: Run Trivy vulnerability scan
+        env:
+          REFERENCE: ${{ matrix.reference }}
+        run: |
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$RUNNER_TEMP/trivy-images/cache:/cache" \
+            --volume "$RUNNER_TEMP/trivy-images/out:/out" \
+            --workdir /out \
+            trivy-scanner \
+            image --cache-dir /cache --image-src docker --scanners vuln \
+            --format json --output /out/vuln.json --exit-code 0 \
+            "$REFERENCE"
+
+      # Fail-closed: any fixable HIGH or CRITICAL vulnerability, any secret, a
+      # missing or malformed report, or a non-empty exceptions file fails the
+      # job. Writes the step summary. Runs after both scans succeeded.
+      - name: Gate image
+        id: gate
+        env:
+          REFERENCE: ${{ matrix.reference }}
+          EXCEPTIONS_FILE: ${{ inputs.exceptions-file }}
+        run: |
+          python3 -I .strange-security/scripts/trivy_images.py gate \
+            --reference "$REFERENCE" \
+            --vuln "$RUNNER_TEMP/trivy-images/out/vuln.json" \
+            --secret "$RUNNER_TEMP/trivy-images/out/secret.json" \
+            --exceptions-file "$EXCEPTIONS_FILE"
+
+      # SARIF for code scanning is a second pass over the same image and the
+      # same DB cache, with the filters trivy-image.yml uses. It never gates:
+      # the JSON gate above does. Skipped with upload-sarif: false.
+      - name: Write secret scan SARIF
+        if: ${{ !cancelled() && inputs.upload-sarif && steps.pull.outcome == 'success' }}
+        env:
+          REFERENCE: ${{ matrix.reference }}
+        run: |
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$RUNNER_TEMP/trivy-images/cache:/cache" \
+            --volume "$RUNNER_TEMP/trivy-images/out:/out" \
+            --workdir /out \
+            trivy-scanner \
+            image --cache-dir /cache --image-src docker --scanners secret \
+            --format sarif --output /out/secret.sarif --exit-code 0 \
+            "$REFERENCE"
+
+      - name: Write vulnerability scan SARIF
+        if: ${{ !cancelled() && inputs.upload-sarif && steps.pull.outcome == 'success' }}
+        env:
+          REFERENCE: ${{ matrix.reference }}
+        run: |
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$RUNNER_TEMP/trivy-images/cache:/cache" \
+            --volume "$RUNNER_TEMP/trivy-images/out:/out" \
+            --workdir /out \
+            trivy-scanner \
+            image --cache-dir /cache --image-src docker --scanners vuln \
+            --severity HIGH,CRITICAL --ignore-unfixed \
+            --format sarif --output /out/vuln.sarif --exit-code 0 \
+            "$REFERENCE"
+
+      # Categories carry the image repository, so every image keeps one code
+      # scanning run, apart from the ones trivy-image.yml writes.
+      - name: Upload secret scan SARIF
+        if: ${{ always() && inputs.upload-sarif }}
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: ${{ runner.temp }}/trivy-images/out/secret.sarif
+          category: trivy-images-secret/${{ matrix.repository }}
+
+      - name: Upload vulnerability scan SARIF
+        if: ${{ always() && inputs.upload-sarif }}
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: ${{ runner.temp }}/trivy-images/out/vuln.sarif
+          category: trivy-images/${{ matrix.repository }}
