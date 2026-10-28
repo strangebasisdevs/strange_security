@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 
 from tests.test_trivy_image_validation import BASH, extract_run_block
@@ -211,6 +212,62 @@ class Rendering(unittest.TestCase):
                     "%00", "a%00b", "a%0ab", "a%0db", "a%1bb", "a%7fb", "a%c2%85b", "a%e2%80%a8b",
                     "%2fetc/passwd", "%5cwindows", "C%3A/x", "file:///src/%2e%2e/x", "file:///etc/x"):
             self.assertEqual(sr.path_of(uri, True), "", uri)
+
+    def test_format_characters_in_a_path_are_refused_like_control_characters(self):
+        # Cf: bidi controls and zero-width characters, whatever the producer.
+        for uri in ("a%E2%80%AEvne.yp", "%E2%80%8B", "a%e2%80%aeb", "a%EF%BB%BFb", "a%E2%81%A6b", "a%D8%9Cb",
+                    "a%E2%80%8Eb", "a%E2%80%8Db", "a%E2%81%A0b", "file:///src/a%E2%80%AEb"):
+            self.assertEqual(sr.path_of(uri, True), "", uri)
+        for uri in ("a\u202evne.yp", "\u200b", "a\ufeffb", "/src/a\u2066b", "file:///src/a\u202eb", "a\u061cb"):
+            self.assertEqual(sr.path_of(uri), "", ascii(uri))
+            self.assertEqual(sr.path_of(uri, True), "", ascii(uri))
+        # Other non-ASCII text is unchanged.
+        self.assertEqual(sr.path_of("caf%C3%A9.env", True), "caf\u00e9.env")
+        self.assertEqual(sr.path_of("%E6%97%A5%E6%9C%AC/%E8%AA%9E.env", True), "\u65e5\u672c/\u8a9e.env")
+        self.assertEqual(sr.path_of("caf\u00e9.env"), "caf\u00e9.env")
+        self.assertEqual(sr.path_of("\u65e5\u672c/\u8a9e.env"), "\u65e5\u672c/\u8a9e.env")
+
+    def test_a_path_with_a_format_character_keeps_the_finding_with_an_empty_file(self):
+        cases = {"trivy-vuln": "a%E2%80%AEvne.yp", "trivy-secret": "%E2%80%8B",
+                 "semgrep": "a\u202evne.yp", "gitleaks": "\u200b"}
+        for tool, uri in cases.items():
+            r = Runner(self)
+            r.write(sarif([result("rule.x", vuln_message(), uri=uri, line=2), result("rule.y", "m", line=3)]))
+            code, summary, out = r.run(tool)
+            self.assertEqual(code, 0)
+            self.assertIn("2 finding(s)", summary, tool)
+            self.assertIn("title=%s rule.x::" % sr.TOOLS[tool][1], out, tool)
+            self.assertNotIn("file=a", out, tool)
+            self.assertFalse([c for c in summary + out if unicodedata.category(c) == "Cf"], tool)
+
+    def test_other_text_with_format_characters_renders_visible_escapes(self):
+        bad = "x\u202ey\ufeffz\u200b"
+        shown = r"x\u202ey\ufeffz\u200b"
+        rules = [{"id": "r" + bad, "shortDescription": {"text": "t" + bad}, "fullDescription": {"text": "f" + bad}}]
+        for tool in sr.TOOLS:
+            r = Runner(self)
+            r.write(sarif([result("r" + bad, vuln_message(package="p" + bad, installed="i" + bad, fixed="v" + bad),
+                                  uri="ok.py", line=1)], rules))
+            _, summary, out = r.run(tool)
+            for text in (summary, out):
+                self.assertFalse([c for c in text if unicodedata.category(c) == "Cf"], tool)
+            self.assertIn("r" + shown.replace("\\", "&#92;"), summary, tool)
+            self.assertIn("r" + shown, out, tool)
+        self.assertEqual(sr.prop(bad), shown)
+        self.assertEqual(sr.data(bad), shown)
+
+    def test_the_producer_comes_only_from_the_tool_argument(self):
+        # A Semgrep or gitleaks SARIF that names itself Trivy is not percent-decoded.
+        for tool in ("semgrep", "gitleaks"):
+            r = Runner(self)
+            document = sarif([result("rule.x", "m", uri="a%20b%E2%80%AEc.env", line=2),
+                              result("rule.y", "m", uri="dir/d%20e.env", line=3)])
+            document["runs"][0]["tool"]["driver"]["name"] = "Trivy"
+            r.write(document)
+            _, summary, out = r.run(tool)
+            self.assertIn("dir/d%20e.env", summary, tool)
+            self.assertNotIn("d e.env", summary + out, tool)
+            self.assertIn("a%20b%E2%80%AEc.env", summary, tool)
 
     def test_trivy_report_decodes_and_semgrep_gitleaks_stay_literal(self):
         results = [result("rule.x", "m", uri="dir/a%20b.env", line=2),
@@ -792,7 +849,7 @@ class SharedEscaping(unittest.TestCase):
             raw = handle.read()
         raw.decode("ascii")
         imports = set(re.findall(rb"^(?:import|from) (\w+)", raw, re.M))
-        self.assertLessEqual(imports, {b"importlib", b"json", b"os", b"re", b"stat", b"sys", b"urllib"})
+        self.assertLessEqual(imports, {b"importlib", b"json", b"os", b"re", b"stat", b"sys", b"unicodedata", b"urllib"})
 
 
 REPORT_STEPS = [

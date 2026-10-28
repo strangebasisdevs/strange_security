@@ -520,8 +520,8 @@ image summaries (`clean()` and `cell()` of `scripts/trivy_images.py`). Paths are
 repo-relative: a leading `/src/` (Semgrep's container mount) and `file://` are
 stripped, and a path with a `..` component is not shown. Trivy writes its paths
 percent-encoded (`dir/a%20b.env`), so for the Trivy reports (chosen by `--tool`, never by
-the SARIF) the path is decoded once and then checked again (no `..`, control
-character or absolute path); Semgrep and gitleaks paths are kept literal. The SARIF is read only
+the SARIF) the path is decoded once and then checked again (no `..`, control or Unicode format
+character or absolute path); Semgrep and gitleaks paths are kept literal, but a path with a Unicode format character (bidi control, zero width) is refused for every tool, and such characters in any other rendered text are shown as visible `\uXXXX` escapes. The SARIF is read only
 if it is a regular file (not a symlink, FIFO or device), at most 64 MiB are read, and anything else
 is the same "report unavailable" warning.
 

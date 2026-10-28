@@ -45,6 +45,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 
 MAX_IMAGES = 20
 MAX_ROWS = 100
@@ -63,10 +64,19 @@ class InputError(Exception):
     """Input that cannot be trusted. Always fails the job."""
 
 
+def escape_format(text):
+    """text with every Unicode format character (category Cf: bidi controls such
+    as U+202E, zero-width characters, U+FEFF) written as a visible backslash-u escape,
+    so nothing invisible can reorder or disguise what a reader sees."""
+    return "".join(("\\u%04x" % ord(c) if ord(c) <= 0xFFFF else "\\U%08x" % ord(c))
+                   if unicodedata.category(c) == "Cf" else c for c in text)
+
+
 def clean(value, limit=200):
     """Untrusted text made safe for a log line and a Markdown table cell: no
-    control characters, no workflow command, no pipe or backtick."""
-    text = "" if value is None else str(value)
+    control characters, no invisible format characters (shown as backslash-u escapes), no
+    workflow command, no pipe or backtick."""
+    text = escape_format("" if value is None else str(value))
     text = re.sub(r"[\x00-\x1f\x7f-\x9f  ]", " ", text)
     text = text.replace("::", ": :").replace("##[", "# #[")
     text = text.replace("|", "/").replace("`", "'")

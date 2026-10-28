@@ -40,6 +40,7 @@ import os
 import re
 import stat
 import sys
+import unicodedata
 import urllib.parse
 
 MAX_ROWS = 200
@@ -76,13 +77,13 @@ _HELPERS = []
 
 
 def _helpers():
-    """(clean, cell) of scripts/trivy_images.py, loaded by path once."""
+    """(clean, cell, escape_format) of scripts/trivy_images.py, loaded by path once."""
     if not _HELPERS:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trivy_images.py")
         spec = importlib.util.spec_from_file_location("trivy_images", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        _HELPERS.extend([module.clean, module.cell])
+        _HELPERS.extend([module.clean, module.cell, module.escape_format])
     return _HELPERS
 
 
@@ -104,8 +105,10 @@ def cell(value, limit=MESSAGE_LIMIT):
 
 def prop(value, limit=300):
     """A workflow command property value (file=, title=): no control character,
-    and % : , escaped so the value cannot end the property list or the command."""
-    text = _UNSAFE_PROPERTY.sub(" ", "" if value is None else str(value)).strip()
+    no invisible format character (shown as a backslash-u escape), and % : , escaped
+    so the value cannot end the property list or the command."""
+    text = _helpers()[2]("" if value is None else str(value))
+    text = _UNSAFE_PROPERTY.sub(" ", text).strip()
     text = text if len(text) <= limit else text[: limit - 3] + "..."
     text = text.replace("##[", "# #[")
     return text.replace("%", "%25").replace(":", "%3A").replace(",", "%2C")
@@ -180,7 +183,7 @@ def path_of(uri, decode=False):
     by the caller from the trusted --tool argument, never from the SARIF: Trivy
     serialises the location through Go's url.Parse(...).String() (pkg/report/sarif.go),
     so "dir/a b.env" arrives as "dir/a%20b.env". The URI is decoded exactly once and
-    the result is checked again (no control character, no absolute path, no "..")."""
+    the result is checked again (no control or Unicode format character, no absolute path, no "..")."""
     if not isinstance(uri, str):
         return ""
     # Without decode only a real URI (file:// scheme) is percent-encoded. gitleaks
@@ -194,6 +197,10 @@ def path_of(uri, decode=False):
         text = urllib.parse.unquote(text)
         if _CONTROL.search(text):
             return ""
+    # An invisible format character (bidi control, zero width) can make a name look
+    # like another: refused for every producer, like a control character.
+    if any(unicodedata.category(ch) == "Cf" for ch in text):
+        return ""
     # Semgrep scans /src inside its container: report repo-relative paths.
     if text.startswith("/src/"):
         text = text[len("/src/"):]

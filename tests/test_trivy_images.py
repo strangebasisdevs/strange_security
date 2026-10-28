@@ -110,6 +110,11 @@ class Clean(unittest.TestCase):
                 self.assertNotIn("##[", cleaned)
                 self.assertNotRegex(cleaned, "[|`\x00-\x1f\x7f-\x9f  ]")
 
+    def test_format_characters_are_shown_as_visible_escapes(self):
+        self.assertEqual(ti.clean("a\u202eb\u200bc\ufeffd\U000e0001"), r"a\u202eb\u200bc\ufeffd\U000e0001")
+        self.assertEqual(ti.cell("a\u202eb"), "a&#92;u202eb")
+        self.assertEqual(ti.clean("caf\u00e9 \u65e5\u672c"), "caf\u00e9 \u65e5\u672c")
+
     def test_long_text_is_cut_and_none_is_empty(self):
         self.assertEqual(len(ti.clean("x" * 500)), 200)
         self.assertEqual(ti.clean(None), "")
