@@ -11,18 +11,25 @@ Usage (always as python3 -I, from the shared checkout):
   trivy_images.py gate --reference REF --vuln VULN.json --secret SECRET.json
                        --exceptions-file PATH [--summary FILE]
       Fail-closed verdict on one image from the two Trivy JSON reports. Exit 0
-      only when the image has no HIGH or CRITICAL vulnerability with a fix and
-      no secret at any severity. Writes a Markdown summary to --summary (the
-      step summary file, when not given the GITHUB_STEP_SUMMARY variable).
+      only when the image has no HIGH or CRITICAL vulnerability with a fix that
+      an exception does not cover, no secret at any severity, and no expired
+      exception in the file. Writes a Markdown summary (failing and excepted
+      findings, stale and expired entries) to --summary (the step summary file,
+      when not given the GITHUB_STEP_SUMMARY variable).
       Exit 1: the image fails. Exit 2: the input cannot be trusted (missing or
-      malformed report, unsupported exceptions file); this fails the job too.
+      malformed report, invalid exceptions file); this fails the job too.
 
-Exceptions are not supported yet: until the exception engine is released, an
-exceptions file that exists and is not empty fails the gate instead of being
-ignored. The caller's .trivyignore and trivy.yaml are not read either.
+Exceptions (docs/IMAGE_EXCEPTIONS.md): a fixable HIGH/CRITICAL vulnerability is
+excepted only by a valid, unexpired entry of the exceptions file that names the
+same repository, the same sha256 digest (the reference must carry it), the same
+vulnerability id and the same package. The engine is scripts/image_exceptions.py,
+which this script loads by path (python3 -I has no script directory on sys.path).
+A missing file means no exceptions; a file that is not valid fails the job. A
+secret is never excepted. The caller's .trivyignore and trivy.yaml are not read.
 
-Standard library only; it imports nothing next to itself, so -I is enough.
+Standard library only.
 """
+import importlib.util
 import json
 import os
 import re
@@ -54,6 +61,19 @@ def clean(value, limit=200):
     text = text.replace("|", "/").replace("`", "'")
     text = text.strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+# Characters that start Markdown or HTML structure (a link, an image, a raw tag, an
+# escape). In a step summary they are written as character references, which render
+# as the same visible character but never open a link, an image or a tag.
+_MARKDOWN_UNSAFE = {ord(c): "&#%d;" % ord(c) for c in "<>[]()!\\"}
+
+
+def cell(value, limit=200):
+    """Untrusted text for a Markdown table cell or list item of the step summary:
+    everything clean() does, plus no raw < > [ ] ( ) ! or backslash, and no URL
+    scheme separator that GitHub would turn into a link."""
+    return clean(value, limit).replace("://", ":/ /").translate(_MARKDOWN_UNSAFE)
 
 
 # ---------------------------------------------------------------- plan
@@ -137,7 +157,8 @@ def plan(env, out):
 # ---------------------------------------------------------------- gate
 
 
-def load_report(path, label):
+def load_report_data(path, label):
+    """The parsed, checked Trivy image report (a dict)."""
     try:
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
@@ -149,12 +170,20 @@ def load_report(path, label):
         raise InputError("the %s report has an unsupported SchemaVersion" % label)
     if data.get("ArtifactType") != "container_image":
         raise InputError("the %s report is not a container image report" % label)
+    return data
+
+
+def results_of(data, label):
     results = data.get("Results")
     if results is None:
         return []
     if not isinstance(results, list) or not all(isinstance(r, dict) for r in results):
         raise InputError("the %s report has malformed Results" % label)
     return results
+
+
+def load_report(path, label):
+    return results_of(load_report_data(path, label), label)
 
 
 def _items(result, key, label):
@@ -187,10 +216,16 @@ def fixable_vulnerabilities(results):
             if severity not in GATE_SEVERITIES:
                 continue
             if (fixed is not None and fixed.strip()) or status == "fixed":
+                pkg = vuln.get("PkgName")
                 found.append({
+                    # id and package are for display only. An exception matches on the
+                    # raw Trivy strings (raw_id, raw_package), never on the cleaned copies:
+                    # clean() would make "a|b" equal "a/b" and drop a trailing space or NUL.
                     "id": clean(vuln.get("VulnerabilityID")),
+                    "raw_id": vuln["VulnerabilityID"],
                     "severity": severity,
-                    "package": clean(vuln.get("PkgName")),
+                    "package": clean(pkg),
+                    "raw_package": pkg if isinstance(pkg, str) else None,
                     "installed": clean(vuln.get("InstalledVersion")),
                     "fixed": clean(fixed),
                     "target": clean(result.get("Target")),
@@ -213,45 +248,73 @@ def secret_findings(results):
     return found
 
 
-def check_exceptions(path):
-    """Exceptions are not supported yet: a non-empty file fails rather than being ignored."""
-    validate_exceptions_path(path)
-    if not os.path.lexists(path):
-        return
+def load_engine():
+    """scripts/image_exceptions.py, loaded by path next to this file."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image_exceptions.py")
+    spec = importlib.util.spec_from_file_location("image_exceptions", path)
+    module = importlib.util.module_from_spec(spec)
     try:
-        size = os.stat(path).st_size if os.path.isfile(path) else None
-    except OSError:
-        size = None
-    if size == 0:
-        return
-    raise InputError(
-        "%s exists and is not empty, but image exceptions are not supported until the exception "
-        "engine release; it is not being ignored silently. Delete the file, or leave it empty, "
-        "and fix the findings instead." % clean(path)
-    )
+        spec.loader.exec_module(module)
+    except (OSError, SyntaxError) as error:
+        raise InputError("cannot load the exception engine: " + clean(error))
+    return module
 
 
-def render_summary(reference, vulns, secrets):
-    lines = ["### Trivy image: %s" % clean(reference), ""]
-    if not vulns and not secrets:
-        lines.append("Passed: no fixable HIGH or CRITICAL vulnerability and no secret.")
-        return "\n".join(lines) + "\n"
-    lines.append("**Failed.** %d fixable HIGH/CRITICAL vulnerabilities, %d secrets." % (len(vulns), len(secrets)))
-    if vulns:
-        lines += ["", "| Severity | Vulnerability | Package | Installed | Fixed in | Target |", "| --- | --- | --- | --- | --- | --- |"]
-        for v in vulns[:MAX_ROWS]:
+def _more(lines, total):
+    if total > MAX_ROWS:
+        lines += ["", "... and %d more." % (total - MAX_ROWS)]
+
+
+def render_summary(reference, failing, secrets, excepted=(), stale=(), expired=()):
+    lines = ["### Trivy image: %s" % cell(reference), ""]
+    if not failing and not secrets and not expired:
+        if excepted:
+            lines.append("Passed: no unexcepted fixable HIGH or CRITICAL vulnerability and no secret; "
+                         "%d fixable finding(s) are excepted." % len(excepted))
+        else:
+            lines.append("Passed: no fixable HIGH or CRITICAL vulnerability and no secret.")
+    else:
+        text = "**Failed.** %d fixable HIGH/CRITICAL vulnerabilities, %d secrets" % (len(failing), len(secrets))
+        if expired:
+            text += ", %d expired exceptions" % len(expired)
+        if excepted:
+            text += " (%d other finding(s) excepted)" % len(excepted)
+        lines.append(text + ".")
+    if failing:
+        lines += ["", "Failing findings:", "", "| Severity | Vulnerability | Package | Installed | Fixed in | Target |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for v in failing[:MAX_ROWS]:
             lines.append("| %s | %s | %s | %s | %s | %s |" % (
-                v["severity"], v["id"], v["package"], v["installed"], v["fixed"], v["target"]))
-        if len(vulns) > MAX_ROWS:
-            lines.append("")
-            lines.append("... and %d more." % (len(vulns) - MAX_ROWS))
+                cell(v["severity"]), cell(v["id"]), cell(v["package"]), cell(v["installed"]), cell(v["fixed"]),
+                cell(v["target"])))
+        _more(lines, len(failing))
     if secrets:
         lines += ["", "| Severity | Rule | Title | File | Line |", "| --- | --- | --- | --- | --- |"]
         for s in secrets[:MAX_ROWS]:
-            lines.append("| %s | %s | %s | %s | %s |" % (s["severity"], s["rule"], s["title"], s["target"], s["line"]))
-        if len(secrets) > MAX_ROWS:
-            lines.append("")
-            lines.append("... and %d more." % (len(secrets) - MAX_ROWS))
+            lines.append("| %s | %s | %s | %s | %s |" % (
+                cell(s["severity"]), cell(s["rule"]), cell(s["title"]), cell(s["target"]), cell(s["line"])))
+        _more(lines, len(secrets))
+    if expired:
+        lines += ["", "Expired exceptions (renew or delete them, see docs/IMAGE_EXCEPTIONS.md):", "",
+                  "| Image | Vulnerability | Package | Expired | Reviewer |", "| --- | --- | --- | --- | --- |"]
+        for e in expired[:MAX_ROWS]:
+            lines.append("| %s | %s | %s | %s | %s |" % (
+                cell(e["image"]), cell(e["id"]), cell(e["package"]), cell(e["expires"]), cell(e["reviewer"])))
+        _more(lines, len(expired))
+    if excepted:
+        lines += ["", "Excepted findings (a reviewed, expiring decision, not a pass):", "",
+                  "| Severity | Vulnerability | Package | Installed | Fixed in | Expires | Reviewer | Reason |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+        for v, e in excepted[:MAX_ROWS]:
+            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                cell(v["severity"]), cell(v["id"]), cell(v["package"]), cell(v["installed"]), cell(v["fixed"]),
+                cell(e["expires"]), cell(e["reviewer"]), cell(e["reason"], 100)))
+        _more(lines, len(excepted))
+    if stale:
+        lines += ["", "Stale exceptions (warnings; delete them or fix them):", ""]
+        for e, why in stale[:MAX_ROWS]:
+            lines.append("- %s %s %s: %s" % (cell(e["image"]), cell(e["id"]), cell(e["package"]), cell(why)))
+        _more(lines, len(stale))
     return "\n".join(lines) + "\n"
 
 
@@ -262,28 +325,52 @@ def write_summary(path, text):
         handle.write(text + "\n")
 
 
-def gate(args, out, err, env):
+def gate(args, out, err, env, today=None):
     summary = args.get("summary") or env.get("GITHUB_STEP_SUMMARY")
     reference = args["reference"]
     try:
-        check_exceptions(args["exceptions-file"])
-        vulns = fixable_vulnerabilities(load_report(args["vuln"], "vulnerability"))
+        validate_exceptions_path(args["exceptions-file"])
+        engine = load_engine()
+        today = engine.today_utc() if today is None else today
+        try:
+            entries = engine.load_exceptions(args["exceptions-file"], today)
+        except engine.ExceptionsError as error:
+            raise InputError("the exceptions file is not valid: %s" % error)
+        vuln_data = load_report_data(args["vuln"], "vulnerability")
+        vulns = fixable_vulnerabilities(results_of(vuln_data, "vulnerability"))
         secrets = secret_findings(load_report(args["secret"], "secret"))
+        # An exception binds to the digest the reference names, and only when the
+        # report confirms it scanned that digest. Otherwise none applies.
+        digest, unbound = engine.reference_digest(reference), "the reference has no sha256 digest"
+        if digest is not None and digest not in engine.report_digests(vuln_data):
+            digest, unbound = None, "the Trivy report does not list the digest in Metadata.RepoDigests"
+        verdict = engine.evaluate(entries, parse_reference(reference)[1], digest, vulns, today, unbound)
     except InputError as error:
         message = "Trivy image %s: %s" % (clean(reference), error)
         err.write("::error::%s\n" % clean(message, 600))
-        write_summary(summary, "### Trivy image: %s\n\n**Failed closed:** %s\n" % (clean(reference), clean(error, 600)))
+        write_summary(summary, "### Trivy image: %s\n\n**Failed closed:** %s\n" % (cell(reference), cell(error, 600)))
         return 2
-    write_summary(summary, render_summary(reference, vulns, secrets))
-    for v in vulns:
+    failing, excepted, stale, expired = verdict["failing"], verdict["excepted"], verdict["stale"], verdict["expired"]
+    write_summary(summary, render_summary(reference, failing, secrets, excepted, stale, expired))
+    for v in failing:
         out.write("fixable %s %s %s %s -> %s\n" % (v["severity"], v["id"], v["package"], v["installed"], v["fixed"]))
     for s in secrets:
         out.write("secret %s %s in %s line %s\n" % (s["severity"], s["rule"], s["target"], s["line"]))
-    if vulns or secrets:
-        err.write("::error::Trivy image %s: %d fixable HIGH/CRITICAL vulnerabilities, %d secrets\n"
-                  % (clean(reference), len(vulns), len(secrets)))
+    for v, e in excepted:
+        out.write("excepted %s %s %s until %s, reviewed by %s\n" % (
+            v["severity"], v["id"], v["package"], clean(e["expires"]), clean(e["reviewer"])))
+    for e, why in stale[:MAX_ROWS]:
+        out.write("::warning::Stale exception (%s), remove it or fix it: %s %s %s\n" % (
+            clean(why), clean(e["image"]), clean(e["id"]), clean(e["package"])))
+    for e in expired[:MAX_ROWS]:
+        err.write("::error::Exception expired on %s: %s %s %s (reviewer %s). Check for a patched release, then "
+                  "renew or delete it (docs/IMAGE_EXCEPTIONS.md).\n" % (
+                      clean(e["expires"]), clean(e["image"]), clean(e["id"]), clean(e["package"]), clean(e["reviewer"])))
+    if failing or secrets or expired:
+        err.write("::error::Trivy image %s: %d fixable HIGH/CRITICAL vulnerabilities, %d secrets, %d expired exceptions\n"
+                  % (clean(reference), len(failing), len(secrets), len(expired)))
         return 1
-    out.write("passed: %s\n" % clean(reference))
+    out.write("passed: %s (%d excepted)\n" % (clean(reference), len(excepted)))
     return 0
 
 
@@ -303,7 +390,7 @@ def parse_gate_args(argv):
     return args
 
 
-def main(argv, env=None, out=None, err=None):
+def main(argv, env=None, out=None, err=None, today=None):
     env = os.environ if env is None else env
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
@@ -311,7 +398,7 @@ def main(argv, env=None, out=None, err=None):
         if len(argv) >= 1 and argv[0] == "plan" and len(argv) == 1:
             return plan(env, out)
         if len(argv) >= 1 and argv[0] == "gate":
-            return gate(parse_gate_args(argv[1:]), out, err, env)
+            return gate(parse_gate_args(argv[1:]), out, err, env, today)
         raise InputError("usage: trivy_images.py plan | gate --reference R --vuln F --secret F --exceptions-file P")
     except InputError as error:
         err.write("::error::%s\n" % clean(error, 600))

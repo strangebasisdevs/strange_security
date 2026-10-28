@@ -66,6 +66,13 @@ No suppressions, ever. Do not add `.trivyignore` entries or `trivy.yaml`
 exclusions to pass the gate. Fix the finding: update the dependency or the base
 image. If nothing fixed exists, the gate already ignores unfixed findings.
 
+This policy is unchanged. The one thing that resembles an exception is not a
+Trivy suppression: the digest-bound, reviewed, expiring image exceptions of
+`trivy-images.yml`, described in [IMAGE_EXCEPTIONS.md](IMAGE_EXCEPTIONS.md).
+They apply only to that workflow's image vulnerabilities, never to a secret,
+the filesystem scan, `trivy-image.yml`, gitleaks or Semgrep, and they do not
+make `.trivyignore` or `trivy.yaml` acceptable.
+
 ## Gitleaks
 
 A secret finding means the credential is already exposed. Rotate it first,
