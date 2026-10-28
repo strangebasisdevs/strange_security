@@ -28,6 +28,86 @@ excluded from the scans. The commit comes from `job.workflow_repository` and
 `job.workflow_sha`, not from the `github` context, which in a called workflow
 describes the caller.
 
+**The caller repository must not contain a `.strange-security` path** of any
+kind, at any depth: no file, directory or symlink (dangling or not), in the
+workspace root or in any subdirectory (`src/.strange-security/` counts). The
+top-level `.git` directory is the only place not searched. `actions/checkout`
+follows a symlink at its target path, and empties an existing directory that
+has no `.git` before cloning into it. A committed `.strange-security -> sub`
+would therefore send the shared checkout into the caller's own `sub/`, wipe
+it, and leave a genuine-looking checkout there, while the scans exclude
+`.strange-security` and so would scan the shared repository instead of `sub/`.
+A real caller directory of that name would be wiped and excluded the same way,
+never scanned. The depth rule exists because Semgrep's `--exclude` is
+gitignore-style and unanchored: `--exclude .strange-security` also skips a
+nested `src/.strange-security/handler.py`, so a caller directory of that name
+anywhere in the tree would silently never be scanned by Semgrep. (Trivy's
+`--skip-dirs` is relative to the scan root and does not have this problem, but
+the rule is the same everywhere.) Each of these workflows therefore refuses
+such a path, found by a `find` that does not follow symlinks, in a step
+before the shared checkout; if that search itself fails (for example an
+unreadable directory) the step fails too, since nothing can then be ruled out.
+The job fails with an error naming up to 20 offending paths
+(`gitleaks.yml` instead skips its findings report with a warning, because its
+history scan does not need the shared checkout and still decides the job
+alone). The verify step then also requires that `.strange-security` is not a
+symlink, that its physical path is `<workspace>/.strange-security`, and that
+it is the root of its own git repository (not a directory inside another
+one), on top of being at the expected commit. Rename or remove the path if a
+workflow of yours trips on it; the scans keep excluding `.strange-security`,
+which after the checkout is the only path of that name in the tree and holds
+the verified shared checkout.
+
+## Caller requirements
+
+A checklist for a repository that calls these workflows. Each item links to
+the section with the details.
+
+Enforced: the run fails without them.
+
+1. Grant `contents: read`, `actions: read` and `security-events: write` to the
+   calling job or workflow, also with `upload-sarif: false`. See
+   [Usage](#usage).
+2. Have no `.strange-security` path anywhere in the repository: no file,
+   directory or symlink, dangling or not, at any depth. See
+   [Security checks](#security-checks).
+3. Pass valid inputs: `timeout-minutes` from 1 to 360; `image` and `digest`
+   for `trivy-image.yml`; at most 20 images for `trivy-images.yml`, each
+   repository once, lowercase, with a tag and/or digest. See
+   [Inputs](#inputs), [Scanning a container image](#scanning-a-container-image)
+   and [Scanning several images](#scanning-several-images).
+4. For private images, set `registry-login: true` and map the
+   `registry-token` secret explicitly (a classic token with `read:packages`;
+   `secrets: inherit` cannot supply it). See
+   [Scanning a container image](#scanning-a-container-image).
+
+Enforced by the checks' own policy:
+
+5. Suppress a Semgrep finding only inline, as `nosemgrep: <rule-id>` with a
+   reason comment on the line above. No `.semgrepignore` entries for source
+   code, no directory excludes, no `--exclude-rule`. See
+   [docs/SUPPRESSIONS.md](docs/SUPPRESSIONS.md).
+6. If you use an image exceptions file or a secret allowlist, keep every entry
+   valid: bound to an image digest, reviewed by a named person, expiring within
+   31 days, and, for an allowlist entry, linked to https evidence. An expired or
+   invalid entry fails the job. See [Image exceptions](#image-exceptions),
+   [Image secret allowlist](#image-secret-allowlist) and
+   [docs/IMAGE_EXCEPTIONS.md](docs/IMAGE_EXCEPTIONS.md).
+
+Expected practice, not checked by the workflows:
+
+7. Call the workflows from a repository under `strangebasisdevs`, pinned by
+   full commit SHA with the release in a comment (`@<40-hex-sha> # vX.Y.Z`),
+   never a branch or tag. Let Dependabot move the pin. See [Usage](#usage).
+8. Review changes to `.semgrepignore`, `.trivyignore`, `trivy.yaml`,
+   `.gitleaks.toml`, `.gitleaksignore`, any `nosemgrep` line and any exception
+   or allowlist entry as security-relevant. List each suppression in the pull
+   request description. Point the repository's `CLAUDE.md` at
+   [docs/SUPPRESSIONS.md](docs/SUPPRESSIONS.md) instead of restating it. See
+   [Suppressions](#suppressions).
+9. Protect the exception and allowlist files with `CODEOWNERS` and branch
+   protection, so an entry cannot land without the reviewer it names.
+
 ## Usage
 
 Call the reusable workflows from jobs in a repository under
@@ -78,7 +158,7 @@ Every reusable workflow takes these two optional inputs:
 
 | Input | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `upload-sarif` | boolean | `true` | Upload the SARIF reports to code scanning. `false` skips every upload step; the caller still grants `security-events: write`, because the workflow's permissions cap requires it. Use it in private user repositories without code scanning. |
+| `upload-sarif` | boolean | `true` | Upload the SARIF reports to code scanning. `false` skips every upload step (the [findings report](#findings-report) still lists the findings); the caller still grants `security-events: write`, because the workflow's permissions cap requires it. Use it in private user repositories without code scanning. |
 | `timeout-minutes` | number | `30` | Timeout of the scan job. The first step rejects anything but a whole number from 1 to 360 before any scan runs. |
 
 `trivy-image.yml` adds `image`, `digest` (both required), `registry-login`
@@ -494,6 +574,55 @@ A finding means the credential is already public: rotate it first.
 It uses the gitleaks release binary, checked against its published sha256,
 rather than the gitleaks GitHub Action.
 
+### Findings report
+
+`trivy.yml`, `semgrep.yml` and `gitleaks.yml` list what a failed check found,
+so the job page names the package, rule and location even with
+`upload-sarif: false` (no code scanning). After the scan, a `Report ... findings`
+step (two in `trivy.yml`, one per scan, so each gets its own 10 annotations) runs with `if: always() && steps.shared_verified.outcome == 'success'` (so after a failed scan, also when `upload-sarif` is `true`, but only once the shared checkout was verified in that run) and renders
+the SARIF the scan already wrote, using `scripts/sarif_report.py` under
+`python3 -I`:
+
+- the step summary gets a table per scan, most severe first, capped at 200
+  rows with a truncation note;
+- one `::error file=...,line=...::` annotation per finding, capped at 10 per
+  scan (GitHub shows at most 10 error annotations per step).
+  `file=` is the full literal path (only `%`, `:`, `,` and line breaks are escaped, nothing is trimmed or shortened);
+  a path over 4096 bytes gets no `file=`, and the finding is still counted in the summary.
+
+Shown per finding: tool, rule or vulnerability id, severity, file path, line;
+for vulnerabilities also package, installed version, fixed version and title;
+for Semgrep the rule's static description (`fullDescription`, else `shortDescription`, else nothing; truncated, escaped); for gitleaks
+the short commit sha. **Never shown**: the matched secret text, Semgrep code
+snippets, SARIF `snippet` and `contextRegion` fields, fingerprints, and, for
+secret scanners (Trivy secrets, gitleaks) and Semgrep (which puts matched code in
+it), the result message. Secrets show
+rule, file and line only. Untrusted text goes through the same escaping as the
+image summaries (`clean()` and `cell()` of `scripts/trivy_images.py`); `cell()` writes every source `&` as `&amp;`
+first, so text like `&#x202e;` or `&rlm;` in a name is shown literally and never acts as a character reference. Paths are
+repo-relative: a leading `/src/` (Semgrep's container mount) and `file://` are
+stripped, and a path with a `..` component is not shown. Trivy writes its paths
+percent-encoded (`dir/a%20b.env`), so for the Trivy reports (chosen by `--tool`, never by
+the SARIF) the path is decoded once and then checked again (no `..`, control or Unicode format
+character or absolute path); Semgrep and gitleaks paths are kept literal, but a path with a Unicode format character (bidi control, zero width) or a lone surrogate is refused for every tool, and such characters in any other rendered text are shown as visible `\uXXXX` escapes. The SARIF is read only
+if it is a regular file (not a symlink, FIFO or device), at most 64 MiB are read, and anything else
+is the same "report unavailable" warning.
+
+The report is fail-safe and never decides the job: the scan step alone does
+(it is not `continue-on-error`). The script exits 0 whatever happens. A
+missing or malformed SARIF is stated in the summary and as a warning, and the
+scan's own exit status stands. A failing report step cannot turn a passing job
+red, and it cannot turn a failing job green.
+
+`gitleaks` prints only a leak count to its log (no file, line or rule without
+`--verbose`, which is not set), so it gets the same redacted report from its
+SARIF. `gitleaks.yml` now also checks out this repository into
+`.strange-security` to run the script; the history scan does not read it. A
+caller-planted `.strange-security` path (see above) only skips that report,
+with a warning; it never changes the scan's result.
+`trivy-image.yml` and `trivy-images.yml` are unchanged: they have their own
+summaries.
+
 ### Suppressions
 
 The policy is in [docs/SUPPRESSIONS.md](docs/SUPPRESSIONS.md): inline
@@ -543,6 +672,16 @@ pull request. They cover:
   the CLI under `python3 -I`, and the wiring of
   `trivy-images.yml` (the real registry-login steps of both image workflows run
   under bash against a stub `docker`);
+- `scripts/sarif_report.py` in `tests/test_sarif_report.py`: rendering for each
+  scanner, redaction (snippet, `contextRegion`, match, fingerprint and message
+  fields must not leak), escaping of hostile paths and messages, row and
+  annotation caps, missing and malformed input, an exit status of 0 in every
+  case, and the wiring of the report steps (`if: always() && steps.shared_verified.outcome == 'success'`,
+  and the same guard on every other `always()` step that runs a shared script, with
+  mutation checks that removing it is caught; `python3 -I`, no
+  `continue-on-error` on the scans, each run block executed under
+  `bash -eo pipefail` with a failing `python3` stub and no SARIF, exit 0, and
+  nothing in it but the `python3` command and its `|| echo` fallback);
 - that every `uses:` in `.github/workflows` is a full 40-hex SHA with a
   `# vX.Y.Z` comment (only the gate's local calls are exempt);
 - the structure of the workflow files in `tests/test_workflows.py` (checker

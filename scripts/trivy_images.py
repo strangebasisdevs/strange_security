@@ -45,6 +45,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 
 MAX_IMAGES = 20
 MAX_ROWS = 100
@@ -63,12 +64,30 @@ class InputError(Exception):
     """Input that cannot be trusted. Always fails the job."""
 
 
+def escape_format(text):
+    """text with every Unicode format character (category Cf: bidi controls such
+    as U+202E, zero-width characters, U+FEFF) and every lone surrogate (category Cs, which
+    cannot be encoded as UTF-8 and would make a write raise) written as a visible
+    backslash-u escape, so nothing invisible can reorder or disguise what a reader sees
+    and no field can break an output write. A valid astral character (emoji, CJK
+    extension B) is one Python character outside the surrogate range and is unchanged."""
+    return "".join(("\\u%04x" % ord(c) if ord(c) <= 0xFFFF else "\\U%08x" % ord(c))
+                   if unicodedata.category(c) in ("Cf", "Cs") else c for c in text)
+
+
 def clean(value, limit=200):
     """Untrusted text made safe for a log line and a Markdown table cell: no
-    control characters, no workflow command, no pipe or backtick."""
-    text = "" if value is None else str(value)
+    control characters, no invisible format characters (shown as backslash-u escapes), no
+    workflow command (no "::" and no "##[" in the result, however long a run of colons or
+    hashes the input holds), no pipe or backtick. Lone surrogates and format characters are
+    escaped first by escape_format()."""
+    text = escape_format("" if value is None else str(value))
     text = re.sub(r"[\x00-\x1f\x7f-\x9f  ]", " ", text)
-    text = text.replace("::", ": :").replace("##[", "# #[")
+    # Every run of 2+ colons gets a space between each pair of colons, so no "::" survives
+    # (":::" would still hold one after a single replace("::", ": :")). Inserting a space
+    # into "##[" cannot re-form the token, so one pass is enough there.
+    text = re.sub(r":{2,}", lambda m: " ".join(m.group()), text)
+    text = text.replace("##[", "# #[")
     text = text.replace("|", "/").replace("`", "'")
     text = text.strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."
@@ -83,8 +102,13 @@ _MARKDOWN_UNSAFE = {ord(c): "&#%d;" % ord(c) for c in "<>[]()!\\"}
 def cell(value, limit=200):
     """Untrusted text for a Markdown table cell or list item of the step summary:
     everything clean() does, plus no raw < > [ ] ( ) ! or backslash, and no URL
-    scheme separator or "www." that GitHub would turn into a link."""
-    text = clean(value, limit).replace("://", ":/ /")
+    scheme separator or "www." that GitHub would turn into a link.
+
+    Source ampersands become &amp; first, before this function writes any character
+    reference of its own, so no source text can form an active reference (named,
+    decimal or hex, with or without the semicolon, e.g. &#x202e; or &rlm;) and the
+    references written below are the only ones in the result."""
+    text = clean(value, limit).replace("&", "&amp;").replace("://", ":/ /")
     # GFM extended autolinks also turn a bare www.host into a link; the dot as a
     # character reference renders the same but is no longer a link.
     text = re.sub(r"(?i)(?<=www)\.", "&#46;", text)

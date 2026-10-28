@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 
 from tests.test_inputs import input_block
@@ -109,6 +110,23 @@ class Clean(unittest.TestCase):
                 self.assertNotIn("::", cleaned)
                 self.assertNotIn("##[", cleaned)
                 self.assertNotRegex(cleaned, "[|`\x00-\x1f\x7f-\x9f  ]")
+
+    def test_no_colon_run_or_hash_bracket_survives(self):
+        values = [":" * n for n in range(2, 40)] + ["a::b:::c", "x::::y", "::::error::::", "a" + ":" * 201,
+                  "###[", "####[x", "##[[", "##[##[", "# ##[", "##" * 50 + "[", "#:#:##[:::"]
+        for value in values:
+            for name, func in (("clean", ti.clean), ("cell", ti.cell)):
+                with self.subTest(value=value, func=name):
+                    out = func(value)
+                    self.assertNotIn("::", out)
+                    self.assertNotIn("##[", out)
+        self.assertEqual(ti.clean(":::"), ": : :")
+        self.assertEqual(ti.clean("a::b"), "a: :b")
+
+    def test_format_characters_are_shown_as_visible_escapes(self):
+        self.assertEqual(ti.clean("a\u202eb\u200bc\ufeffd\U000e0001"), r"a\u202eb\u200bc\ufeffd\U000e0001")
+        self.assertEqual(ti.cell("a\u202eb"), "a&#92;u202eb")
+        self.assertEqual(ti.clean("caf\u00e9 \u65e5\u672c"), "caf\u00e9 \u65e5\u672c")
 
     def test_long_text_is_cut_and_none_is_empty(self):
         self.assertEqual(len(ti.clean("x" * 500)), 200)
@@ -447,6 +465,46 @@ class Gate(unittest.TestCase):
         code, out, err, summary = self.run_gate(report(result([hostile], target="t")))
         self.assertEqual(code, 1)
         self.assert_cell_is_inert([l for l in summary.splitlines() if "CVE-2026-0003" in l][0], 7)
+
+    def test_source_ampersands_cannot_form_character_references(self):
+        for value in ("safe&#x202e;txt.exe", "config&#46;env", "&lt;b&gt;", "&amp;", "&#124;", "&#X202E",
+                      "&rlm;", "&ZeroWidthSpace;", "pkg&amp"):
+            cell = ti.cell(value)
+            with self.subTest(value=value):
+                self.assertNotRegex(cell, r"&(?!amp;|#\d{2,3};)")
+                self.assertIn("&amp;", cell)
+        self.assertEqual(ti.cell("&#46;"), "&amp;#46;")
+        # helper-generated references stay single
+        self.assertEqual(ti.cell("a&<b www.x"), "a&amp;&#60;b www&#46;x")
+        self.assertEqual(ti.cell("a‮b&"), "a&#92;u202eb&amp;")
+        # plain-text log output is not escaped
+        self.assertEqual(ti.clean("a&b"), "a&b")
+
+    def test_lone_surrogates_are_escaped_and_astral_characters_kept(self):
+        self.assertEqual(ti.clean("a\ud800b\udfffc"), r"a\ud800b\udfffc")
+        self.assertEqual(ti.cell("a\ud800b"), "a&#92;ud800b")
+        self.assertEqual(ti.clean("a\U0001F600\U00020000"), "a\U0001F600\U00020000")
+        self.assertEqual(ti.cell("a\U0001F600\U00020000"), "a\U0001F600\U00020000")
+
+    def test_image_summary_renders_a_lone_surrogate_in_a_package_name(self):
+        hostile = vuln("CVE-2026-0005", PkgName="p\ud800\U0001F600", InstalledVersion="i\udfff",
+                       FixedVersion="f\ud800")
+        code, out, err, summary = self.run_gate(report(result([hostile], target="t\ud800")))
+        self.assertEqual(code, 1)
+        row = [l for l in summary.splitlines() if "CVE-2026-0005" in l][0]
+        self.assertIn("p&#92;ud800\U0001F600", row)
+        for text in (out, err, summary):
+            self.assertFalse([c for c in text if unicodedata.category(c) == "Cs"])
+
+    def test_image_summary_neutralises_source_ampersands(self):
+        entity = "x&#x202e;y&rlm;&ZeroWidthSpace;&#46;"
+        hostile = vuln("CVE-2026-0004", PkgName="p" + entity, InstalledVersion="i" + entity,
+                       FixedVersion="f" + entity)
+        code, out, err, summary = self.run_gate(report(result([hostile], target="t" + entity)))
+        self.assertEqual(code, 1)
+        row = [l for l in summary.splitlines() if "CVE-2026-0004" in l][0]
+        self.assertNotRegex(row, r"&(?!amp;|#\d{2,3};)")
+        self.assertIn("px&amp;#x202e;y&amp;rlm;&amp;ZeroWidthSpace;&amp;#46;", row)
 
     def test_hostile_secret_fields_are_inert_in_the_summary(self):
         leaked = report(result(secrets=[secret(RuleID="r" + self.HOSTILE, Title="t" + self.HOSTILE)],

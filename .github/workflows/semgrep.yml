@@ -67,6 +67,33 @@ jobs:
           echo "repository=$WORKFLOW_REPOSITORY" >> "$GITHUB_OUTPUT"
           echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
+      # actions/checkout follows a symlink at its target path and empties an existing
+      # directory that has no .git before cloning into it. A caller that committed a
+      # .strange-security file, directory or symlink (even a dangling one) could so
+      # make the shared checkout wipe and replace one of its own directories, which
+      # the scans then skip as "the shared checkout". Refuse any such path, before
+      # the shared checkout, so .strange-security only ever holds that checkout.
+      - name: Refuse caller-planted .strange-security path
+        run: |
+          if [ -e .strange-security ] || [ -L .strange-security ]; then
+            echo "::error::The caller repository must not contain a .strange-security path (file, directory or symlink): the shared workflow source is checked out there and that path is excluded from the scans"
+            exit 1
+          fi
+          # The same rule at any depth: find does not follow symlinks, prunes only the
+          # top-level ./.git, and -name matches directories, files and symlinks (also
+          # dangling ones). If find fails (unreadable directory, ...) the step fails too.
+          list=$(mktemp) || { echo "::error::Could not create a temporary file to search the workspace for .strange-security paths"; exit 1; }
+          trap 'rm -f "$list"' EXIT
+          if ! find . -path ./.git -prune -o -name .strange-security -print0 >"$list"; then
+            echo "::error::Could not search the whole workspace for .strange-security paths, so none can be ruled out"
+            exit 1
+          fi
+          if [ -s "$list" ]; then
+            found=$(head -z -n 20 "$list" | tr '\0' ' ' | tr -c 'A-Za-z0-9._/ -' '?')
+            echo "::error::The caller repository must not contain a .strange-security path (file, directory or symlink) at any depth: the shared workflow source is checked out there and that path is excluded from the scans, found (first 20): $found"
+            exit 1
+          fi
+
       # The Dockerfile lives in this workflow's repository, so check it out at
       # the exact commit this workflow file came from.
       - name: Checkout shared workflow repository
@@ -77,12 +104,31 @@ jobs:
           path: .strange-security
           persist-credentials: false
 
+      # The report and checker steps below run under always(), so after a failed
+      # scan too. They run code from this checkout only if this step succeeded in
+      # this run (steps.shared_verified.outcome == 'success'): the checkout is the
+      # exact commit this workflow file came from and holds the scripts. Resolving,
+      # checking out or verifying stays gating: if it fails the job fails.
       - name: Verify shared workflow checkout
+        id: shared_verified
         env:
           WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
         run: |
-          test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
+          fail() { echo "::error::$1"; exit 1; }
+          # A real directory at exactly <workspace>/.strange-security, the root of
+          # its own git repository: not a symlink, not reached through one, and
+          # not a subdirectory of another repository such as the caller's.
+          [ ! -L .strange-security ] || fail ".strange-security must not be a symlink"
+          workspace="$(pwd -P)" || fail "cannot resolve the workspace"
+          location="$(cd .strange-security && pwd -P)" || fail ".strange-security is not a directory"
+          [ "$location" = "$workspace/.strange-security" ] || fail ".strange-security does not resolve to the workspace's own .strange-security directory"
+          toplevel="$(git -C .strange-security rev-parse --show-toplevel)" || fail ".strange-security is not a git checkout"
+          toplevel="$(cd "$toplevel" && pwd -P)" || fail "cannot resolve the git top level of .strange-security"
+          [ "$toplevel" = "$location" ] || fail ".strange-security is not the root of its own git repository"
+          [ "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA" ] || fail ".strange-security is not at the workflow commit"
           test -d .strange-security/scanner-images
+          test -f .strange-security/scripts/sarif_report.py
+          test -f .strange-security/scripts/check_suppressions.py
 
       # Image version lives in scanner-images/semgrep.Dockerfile, the single spot Dependabot updates.
       - name: Build Semgrep image
@@ -116,11 +162,24 @@ jobs:
           sarif_file: ${{ runner.temp }}/semgrep/semgrep.sarif
           category: semgrep
 
+      # Findings in the step summary and as annotations, from the SARIF above,
+      # whether or not it is uploaded. No code snippets are shown. Always, so it
+      # runs after a failed scan; it exits 0 whatever happens, so it never
+      # changes the job result (only the scan decides).
+      - name: Report Semgrep findings
+        if: always() && steps.shared_verified.outcome == 'success'
+        run: |
+          python3 -I .strange-security/scripts/sarif_report.py --tool semgrep \
+            --sarif "$RUNNER_TEMP/semgrep/semgrep.sarif" \
+            || echo "::warning::The Semgrep findings report could not run"
+
       # Policy check on the caller's code (docs/SUPPRESSIONS.md), run from the
       # shared checkout with -I so the caller cannot influence the interpreter.
       # The shared checkout itself is not scanned. Last, with always(), so a
       # failing check cannot skip the scan or the upload, and a failing scan
-      # or upload cannot skip the check; any one failing fails the job.
+      # or upload cannot skip the check; any one failing fails the job. Only from
+      # a verified shared checkout: if that failed the job has already failed, and
+      # the check is skipped rather than run from an unauthenticated script.
       - name: Check Semgrep suppressions
-        if: always()
+        if: always() && steps.shared_verified.outcome == 'success'
         run: python3 -I .strange-security/scripts/check_suppressions.py .

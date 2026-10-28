@@ -53,6 +53,98 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The next four steps only fetch the findings report script. They are
+      # non-gating: continue-on-error keeps a failure here from failing the job or
+      # skipping the gitleaks install and scan, whose result alone decides the job.
+      # If any of them fails the report is skipped with a warning.
+      #
+      # In a called workflow the github context belongs to the caller, so
+      # github.workflow_ref names the caller's workflow. job.workflow_repository
+      # and job.workflow_sha name this file's own repository and commit. Stop if
+      # they are empty: actions/checkout would silently fall back to the caller.
+      - name: Resolve shared workflow source
+        id: shared
+        continue-on-error: true
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::warning::job.workflow_repository or job.workflow_sha is empty, the findings report is skipped"
+            exit 1
+          fi
+          echo "repository=$WORKFLOW_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
+      # actions/checkout follows a symlink at its target path and empties an existing
+      # directory that has no .git before cloning into it. A caller that committed a
+      # .strange-security file, directory or symlink (even a dangling one) must not
+      # steer that. Non-gating like the rest of the report setup: such a path only
+      # skips the shared checkout, and with it the findings report, with a warning.
+      # The history scan does not read the path and still decides the job alone.
+      - name: Refuse caller-planted .strange-security path
+        id: shared_precheck
+        continue-on-error: true
+        run: |
+          if [ -e .strange-security ] || [ -L .strange-security ]; then
+            echo "::warning::The caller repository must not contain a .strange-security path (file, directory or symlink), the findings report is skipped"
+            exit 1
+          fi
+          # The same rule at any depth: find does not follow symlinks, prunes only the
+          # top-level ./.git, and -name matches directories, files and symlinks (also
+          # dangling ones). If find fails (unreadable directory, ...) the step fails too.
+          list=$(mktemp) || { echo "::warning::Could not create a temporary file to search the workspace for .strange-security paths"; exit 1; }
+          trap 'rm -f "$list"' EXIT
+          if ! find . -path ./.git -prune -o -name .strange-security -print0 >"$list"; then
+            echo "::warning::Could not search the whole workspace for .strange-security paths, so none can be ruled out"
+            exit 1
+          fi
+          if [ -s "$list" ]; then
+            found=$(head -z -n 20 "$list" | tr '\0' ' ' | tr -c 'A-Za-z0-9._/ -' '?')
+            echo "::warning::The caller repository must not contain a .strange-security path (file, directory or symlink) at any depth, the findings report is skipped, found (first 20): $found"
+            exit 1
+          fi
+
+      # The findings report script lives in this workflow's repository, so check
+      # it out at the exact commit this workflow file came from. Only after the
+      # source was resolved, never with the empty fallback to the caller, and
+      # never into a path the caller planted.
+      - name: Checkout shared workflow repository
+        id: shared_checkout
+        if: steps.shared.outcome == 'success' && steps.shared_precheck.outcome == 'success'
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.shared.outputs.repository }}
+          ref: ${{ steps.shared.outputs.sha }}
+          path: .strange-security
+          persist-credentials: false
+
+      # The report runs only if this succeeded: the checkout is the exact commit
+      # and holds the script. The check stays strict; a failure only skips the report.
+      - name: Verify shared workflow checkout
+        id: shared_verified
+        if: steps.shared_checkout.outcome == 'success'
+        continue-on-error: true
+        env:
+          WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
+        run: |
+          skip() { echo "::warning::The shared workflow checkout could not be verified ($1), the findings report is skipped"; exit 1; }
+          # A real directory at exactly <workspace>/.strange-security, the root of
+          # its own git repository: not a symlink, not reached through one, and
+          # not a subdirectory of another repository such as the caller's.
+          [ ! -L .strange-security ] || skip ".strange-security is a symlink"
+          workspace="$(pwd -P)" || skip "cannot resolve the workspace"
+          location="$(cd .strange-security && pwd -P)" || skip ".strange-security is not a directory"
+          [ "$location" = "$workspace/.strange-security" ] || skip ".strange-security is not the workspace's own directory"
+          toplevel="$(git -C .strange-security rev-parse --show-toplevel)" || skip ".strange-security is not a git checkout"
+          toplevel="$(cd "$toplevel" && pwd -P)" || skip "cannot resolve the git top level"
+          [ "$toplevel" = "$location" ] || skip ".strange-security is not the root of its own git repository"
+          head="$(git -C .strange-security rev-parse HEAD)" || head=""
+          if [ -z "$head" ] || [ "$head" != "$WORKFLOW_SHA" ] || [ ! -f .strange-security/scripts/sarif_report.py ]; then
+            skip "wrong commit or missing script"
+          fi
+
       # Not the gitleaks GitHub Action (organisation licence key, one more action
       # to trust): the release binary, checked against its published sha256.
       # Dependabot does not track this pin; bump the version and hash together.
@@ -85,6 +177,18 @@ jobs:
           gitleaks git --no-banner --redact --exit-code 1 \
             --log-opts="-m --full-history --all --diff-filter=tuxdb" \
             --report-format sarif --report-path gitleaks.sarif .
+
+      # gitleaks logs only a leak count without --verbose, so this names rule,
+      # file, line and commit from the (already redacted) SARIF in the step
+      # summary and as annotations. Never the secret, the match or the commit
+      # author. Runs after a failed scan too, but only from a verified shared
+      # checkout; it exits 0 whatever happens, so it never changes the job
+      # result (only the scan decides).
+      - name: Report gitleaks findings
+        if: always() && steps.shared_verified.outcome == 'success'
+        run: |
+          python3 -I .strange-security/scripts/sarif_report.py --tool gitleaks --sarif gitleaks.sarif \
+            || echo "::warning::The gitleaks findings report could not run"
 
       - name: Upload SARIF results
         if: ${{ always() && inputs.upload-sarif }}
