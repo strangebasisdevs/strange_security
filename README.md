@@ -15,7 +15,7 @@ repositories. Results are uploaded to GitHub code scanning as SARIF.
 | `trivy.yml` | Secrets in the working tree, and filesystem dependency vulnerabilities | Any secret, at any severity; `HIGH` or `CRITICAL` vulnerabilities that have a fix |
 | `gitleaks.yml` | Secrets anywhere in the git history | Any finding |
 | `trivy-image.yml` | Secrets and OS/package vulnerabilities in one container image, by digest | Any secret, at any severity; `HIGH` or `CRITICAL` vulnerabilities that have a fix |
-| `trivy-images.yml` | The same checks on a list of images (`repo:tag`, `repo@sha256:...`), each in its own job | The same, decided by a fail-closed gate script, unless a [reviewed, digest-bound, expiring exception](docs/IMAGE_EXCEPTIONS.md) covers the vulnerability (never a secret); an expired exception; an invalid exceptions file |
+| `trivy-images.yml` | The same checks on a list of images (`repo:tag`, `repo@sha256:...`), each in its own job | The same, decided by a fail-closed gate script, unless a [reviewed, digest-bound, expiring exception](docs/IMAGE_EXCEPTIONS.md) covers the vulnerability (never a secret), or a [reviewed, digest-bound, expiring allowlist entry](#image-secret-allowlist) covers that one known-public secret finding (never a vulnerability); an expired entry in either file; an invalid exceptions or allowlist file |
 
 All of them run on `ubuntu-24.04`, check out the caller repository, and upload
 their SARIF reports even when a scan fails the job.
@@ -84,7 +84,8 @@ Every reusable workflow takes these two optional inputs:
 `trivy-image.yml` adds `image`, `digest` (both required), `registry-login`
 (boolean, default `false`) and the optional `registry-token` secret.
 `trivy-images.yml` adds `images` (required), `exceptions-file`,
-`registry-login` and the same secret. Both are described below.
+`secret-allowlist-file`, `registry-login` and the same secret. Both are
+described below.
 
 A private repository without code scanning, with a longer timeout. The caller
 still grants the full cap:
@@ -183,6 +184,7 @@ bundle, a compose stack, a base-image list). It does not replace
 | --- | --- | --- | --- |
 | `images` | string | required | One reference per line: `repo:tag`, `repo@sha256:...` or `repo:tag@sha256:...`. Prefer a digest: a tag can move. At most 20, each repository once (each gets its own code scanning category). Whitespace inside a reference, shell metacharacters, uppercase letters, an empty list or a reference with neither tag nor digest fail before any scan. |
 | `exceptions-file` | string | `.github/image-exceptions.json` | Path of the exceptions file in the caller's repository ([schema and process](#image-exceptions)). A missing file means no exceptions; a file that exists but is not valid fails the job. |
+| `secret-allowlist-file` | string | `.github/image-secret-allowlist.json` | Path of the secret allowlist file in the caller's repository ([schema and process](#image-secret-allowlist)), a different file with a different schema than `exceptions-file`. A missing file means no allowlist; a file that exists but is not valid fails the job. |
 | `upload-sarif` | boolean | `true` | As for the other workflows. |
 | `timeout-minutes` | number | `30` | Timeout of each image's scan job, validated 1 to 360 by the first step. |
 | `registry-login` | boolean | `false` | Log in to `ghcr.io` with the `registry-token` secret before pulling. |
@@ -231,12 +233,18 @@ Rollout notes for a consumer:
   [Image exceptions](#image-exceptions). A file that exists must be valid, an
   empty file included, or the job fails. List the image with its digest, or no
   exception can apply to it.
+- A secret in an image layer fails the image, as before. Only a value that is
+  public by design (a documented emulator key, for example) can be allowed, one
+  finding at a time, through the separate
+  [secret allowlist](#image-secret-allowlist). Without that file nothing
+  changes for you. Rotate the value first if it is a real credential.
 
 ### Image exceptions
 
 An exception lets `trivy-images.yml` pass a fixable `HIGH` or `CRITICAL`
 vulnerability that cannot be fixed yet. It is for `trivy-images.yml` image
-vulnerabilities only: never a secret, and never a filesystem (`trivy.yml`),
+vulnerabilities only: never a secret (a known-public secret has its own
+[allowlist](#image-secret-allowlist)), and never a filesystem (`trivy.yml`),
 gitleaks, Semgrep or `trivy-image.yml` finding. The process (who reviews, the
 monthly cadence, checking for a patched release, deleting stale entries and the
 renew pull request) is written once, in
@@ -292,6 +300,111 @@ process document). The draft has no reason, and no reviewer or date unless you
 give them; it does not validate until a person completes it, and the command
 never overwrites a file.
 
+### Image secret allowlist
+
+A secret found in an image layer fails `trivy-images.yml` at any severity, and
+a vulnerability exception can never cover it. The one way to let such a finding
+pass is a secret allowlist entry, for a value that is **public by design**: a
+documented emulator or test key, vendored in a third-party library, that opens
+nothing. The motivating case is the public development storage key of the Azurite
+emulator, which the Nextcloud image carries in a vendored Azure library and Trivy
+reports as `azure-storage-account-key`. If the value is, or might be, a real
+credential, rotate it first and rebuild the image; it never belongs in this file.
+The process (what the reviewer checks, the monthly cadence, stale entries) is in
+[docs/IMAGE_EXCEPTIONS.md](docs/IMAGE_EXCEPTIONS.md#known-public-secrets-the-secret-allowlist).
+
+`secret-allowlist-file` (default `.github/image-secret-allowlist.json`) is a
+different file from `exceptions-file`, with its own schema and its own
+commands, and each file is refused where the other is expected. It is JSON with
+exactly one top-level key (the digests below are placeholders; `generate-secrets`
+writes the real ones from your scan):
+
+```json
+{
+  "allowlist": [
+    {
+      "image": "nextcloud",
+      "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "rule": "azure-storage-account-key",
+      "target": "var/www/html/3rdparty/microsoft/azure-storage-common/src/Common/Internal/Resources.php",
+      "layer_diff_id": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "start_line": 123,
+      "match_sha256": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+      "reason": "The documented Azurite emulator development key, public in the Microsoft docs; not a credential",
+      "evidence": "https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite",
+      "reviewer": "Your Name",
+      "reviewed": "2026-11-03",
+      "expires": "2026-12-03"
+    }
+  ]
+}
+```
+
+| Field | Required | Rule |
+| --- | --- | --- |
+| `image` | yes | The repository of the `images` line, without tag or digest, as for an exception. |
+| `digest` | yes | `sha256:` and 64 lowercase hex characters. The entry applies only to the image scanned at this digest, which the `images` line must carry and the Trivy secret report must list in `Metadata.RepoDigests`. An image listed by tag alone is never allowed. |
+| `rule` | yes | The Trivy secret rule id (`RuleID`), lowercase words joined by hyphens. |
+| `target` | yes | The path of the one file inside the image where Trivy found it (the `Target` of the result), printable ASCII, exactly as Trivy writes it. |
+| `layer_diff_id` | yes | The `DiffID` Trivy reports in the finding's `Layer`: the sha256 of the uncompressed layer, from the image configuration. It is used rather than `Layer.Digest` because Trivy does not report the compressed digest for an image read from the Docker daemon, which is how this workflow scans. |
+| `start_line` | yes | The `StartLine` of the finding, a whole number from 1. |
+| `match_sha256` | no | `sha256:` and the hash of Trivy's redacted `Match` line, to pin the content of the line. `generate-secrets` fills it. Required to tell two findings of one rule on one line apart. |
+| `reason` | yes | One line, 10 to 300 characters: why the value is public and not a credential. |
+| `evidence` | yes | An `https://` link, without credentials, to the public source that publishes the value (a vendor document, an upstream repository). |
+| `reviewer` | yes | The person who reviewed it, never a bot or an agent. |
+| `reviewed` | yes | `YYYY-MM-DD` (UTC), not after today. |
+| `expires` | yes | `YYYY-MM-DD`, on or after `reviewed` and at most 31 days after it. The last day it is live. |
+
+An entry matches **one finding**: the image, digest, rule, file, layer and line
+must all equal what Trivy reports (compared exactly: no trimming, no
+normalisation, no wildcards in any field), the Trivy secret report must list the
+digest, and `match_sha256`, when the entry has it, must equal the hash of the
+finding's `Match` line. A second finding with the same rule, file, layer and line
+still fails. The same secret in another file, another layer or on another line of
+the same image fails; so does a secret in a new image digest, until it is
+reviewed again. Any other field is refused, so are duplicate keys, wildcards
+(`*`, `?`, `[`, `]`, `{`, `}`), a missing or non-`https` evidence link, a
+`reviewed` date in the future and a span of more than 31 days. A file that breaks
+any rule fails every image job; it is never partly applied. An entry that has
+expired fails every image job in the repository (renew or delete it); a live
+entry that matches nothing is a warning (delete it).
+
+It never applies to a vulnerability, to the filesystem scan (`trivy.yml`), to
+gitleaks, to Semgrep or to `trivy-image.yml`, and no other workflow reads the
+file. The matched text of a finding is never printed: the step summary and the
+log list each allowlisted secret in a table of its own (rule, file, line, layer,
+expiry, reviewer, evidence and reason), apart from the failing findings. The
+SARIF pass is not filtered by the allowlist, so code scanning keeps showing the
+alert.
+
+`python3 -I scripts/image_secret_allowlist.py validate FILE` checks a file, and
+`python3 -I scripts/image_secret_allowlist.py generate-secrets --scan REF REPORT ...`
+writes a draft of entries from a Trivy secret JSON report for a person to
+complete. The draft has an empty `reason`, `evidence` and `reviewer`, and no
+dates, unless you give them (`--reason`, `--evidence`, `--reviewer`,
+`--reviewed`); nothing defaults to today, it does not validate until a person
+completes it, and the command never overwrites a file (`--output` must be a
+new path, or the draft goes to standard output).
+
+Rollout for a consumer that carries such a value (for example `strangeservers`
+and the Azurite key in the `nextcloud` image):
+
+1. Move the pin of `trivy-images.yml` to a release that has the
+   `secret-allowlist-file` input. Without the file nothing is allowed.
+2. List the image with its digest (`nextcloud@sha256:...`). Scan that image the
+   way the workflow does, with `--scanners secret --format json`, and run
+   `generate-secrets` on the report (see the process document).
+3. Check the draft: one entry, rule `azure-storage-account-key`, the vendored
+   `Resources.php` as `target`. Confirm in the published Azurite documentation
+   that the value is the documented development key (compare them yourself; do
+   not copy the value anywhere), and put that page in `evidence`. Write the
+   `reason`, set `reviewer` and `reviewed`. Delete every other entry: a finding
+   you cannot show to be public must stay failing.
+4. Save it as `.github/image-secret-allowlist.json`, run `validate`, and open the
+   pull request. The `Trivy images` check lists the secret under "Allowlisted
+   secrets" and passes; the pull request diff is the review.
+5. Renew it every month, and again when the image digest changes.
+
 ## Workflow behavior
 
 ### Semgrep
@@ -340,22 +453,29 @@ vulnerabilities (every severity, nothing filtered). It then runs
 `scripts/trivy_images.py gate` as `python3 -I` on the two reports, which is
 what decides the job:
 
-- it fails on any secret, and on any `HIGH` or `CRITICAL` vulnerability that
-  has a fixed version (the findings `trivy-image.yml` fails on) and that no
-  valid, unexpired exception bound to the image digest covers;
+- it fails on any secret that no valid, unexpired allowlist entry bound to the
+  image digest, layer, file, rule and line covers (one entry, one finding), and
+  on any `HIGH` or `CRITICAL` vulnerability that has a fixed version (the
+  findings `trivy-image.yml` fails on) and that no valid, unexpired exception
+  bound to the image digest covers; neither file ever covers the other kind of
+  finding;
 - it fails closed on a missing or malformed report, an unexpected severity or
   a field of the wrong type (for example `Vulnerabilities` given as an object),
   instead of passing;
-- it fails on an expired exception, and on an exceptions file that exists but
-  is not valid; a missing file means no exceptions;
+- it fails on an expired exception or allowlist entry, and on an exceptions
+  file or an allowlist file that exists but is not valid; a missing file means
+  no exceptions, or no allowlist;
 - it writes a step summary listing the failing findings (package, installed
   and fixed version) and secrets (rule, file and line; the matched text is
-  never printed), the excepted findings with their expiry and reviewer, and
-  the stale exceptions as warnings.
+  never printed), the excepted findings with their expiry and reviewer, the
+  allowlisted secrets in a separate table (rule, file, line, layer, expiry,
+  reviewer, evidence link and reason), and the stale entries as warnings.
 
 Unlike `trivy-image.yml`, Trivy runs in an empty working directory, so a
-caller's `.trivyignore` and `trivy.yaml` do not apply: the exceptions file is
-the only suppression path ([Image exceptions](#image-exceptions)). With `upload-sarif`
+caller's `.trivyignore` and `trivy.yaml` do not apply: the only ways to pass a
+finding are the exceptions file for a vulnerability
+([Image exceptions](#image-exceptions)) and the secret allowlist for a
+known-public secret ([Image secret allowlist](#image-secret-allowlist)). With `upload-sarif`
 true, a second pass writes a secret and a `HIGH`/`CRITICAL` fixable
 vulnerability SARIF per image (the gate does not depend on it), uploaded to the
 `trivy-images-secret/<repository>` and `trivy-images/<repository>` categories,
@@ -409,6 +529,14 @@ pull request. They cover:
   (it never defaults a date or a reviewer and never overwrites a file),
   mutation checks that loosen the schema and the engine and expect the tests to
   notice, and the rule that only `trivy-images.yml` uses an exceptions file;
+- `scripts/image_secret_allowlist.py` in `tests/test_image_secret_allowlist.py`
+  and `tests/test_image_secret_gate.py`: the strict schema (evidence link,
+  no wildcards, unknown fields), the binding of one entry to one finding (each
+  of digest, image, layer, file, rule, line and content hash must match), expiry
+  and stale entries, the `generate-secrets` command, mutation checks, that an
+  entry never covers a vulnerability and a vulnerability exception never covers
+  a secret, the summary escaping, the gate's exit status, and the rule that only
+  `trivy-images.yml` uses an allowlist file;
 - `scripts/trivy_images.py` in `tests/test_trivy_images.py`: image list
   validation, the fail-closed gate on Trivy JSON fixtures (including
   type-confused fields), the exception engine inside the gate, summary safety,

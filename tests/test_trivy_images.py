@@ -132,7 +132,8 @@ class Plan(unittest.TestCase):
     def run_plan(self, images, exceptions=".github/image-exceptions.json"):
         with tempfile.TemporaryDirectory() as tmp:
             output = os.path.join(tmp, "output")
-            env = {"IMAGES": images, "EXCEPTIONS_FILE": exceptions, "GITHUB_OUTPUT": output}
+            env = {"IMAGES": images, "EXCEPTIONS_FILE": exceptions, "GITHUB_OUTPUT": output,
+                   "SECRET_ALLOWLIST_FILE": ".github/image-secret-allowlist.json"}
             out, err = io.StringIO(), io.StringIO()
             code = ti.main(["plan"], env, out, err)
             written = slurp(output) if os.path.exists(output) else ""
@@ -159,7 +160,8 @@ class Plan(unittest.TestCase):
 
     def test_a_missing_output_file_variable_fails(self):
         out, err = io.StringIO(), io.StringIO()
-        self.assertEqual(ti.main(["plan"], {"IMAGES": "app:1", "EXCEPTIONS_FILE": "x.json"}, out, err), 2)
+        env = {"IMAGES": "app:1", "EXCEPTIONS_FILE": "x.json", "SECRET_ALLOWLIST_FILE": "y.json"}
+        self.assertEqual(ti.main(["plan"], env, out, err), 2)
 
     def test_bad_usage_fails(self):
         for argv in ([], ["nope"], ["plan", "extra"], ["gate"]):
@@ -683,7 +685,7 @@ class Cli(unittest.TestCase):
     """The script as the workflow runs it: python3 -I, arguments and environment only."""
 
     def run_cli(self, args, env_extra, cwd):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("IMAGES", "EXCEPTIONS_FILE", "GITHUB_"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("IMAGES", "EXCEPTIONS_FILE", "SECRET_ALLOWLIST_FILE", "GITHUB_"))}
         env.update(env_extra)
         return subprocess.run([sys.executable, "-I", SCRIPT] + args, env=env, cwd=cwd, capture_output=True, text=True)
 
@@ -691,7 +693,7 @@ class Cli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = os.path.join(tmp, "out")
             result_ = self.run_cli(["plan"], {"IMAGES": "app@" + DIGEST + "\n", "EXCEPTIONS_FILE": ".github/e.json",
-                                              "GITHUB_OUTPUT": output}, tmp)
+                                              "SECRET_ALLOWLIST_FILE": ".github/a.json", "GITHUB_OUTPUT": output}, tmp)
             self.assertEqual(result_.returncode, 0, result_.stderr)
             self.assertIn("matrix=", slurp(output))
             for name in ("v.json", "s.json"):
@@ -712,7 +714,8 @@ class Cli(unittest.TestCase):
             with open(os.path.join(tmp, "json.py"), "w", encoding="utf-8") as handle:
                 handle.write("raise SystemExit(99)\n")
             output = os.path.join(tmp, "out")
-            result_ = self.run_cli(["plan"], {"IMAGES": "app:1", "EXCEPTIONS_FILE": "e.json", "GITHUB_OUTPUT": output}, tmp)
+            result_ = self.run_cli(["plan"], {"IMAGES": "app:1", "EXCEPTIONS_FILE": "e.json", "SECRET_ALLOWLIST_FILE": "a.json",
+                                              "GITHUB_OUTPUT": output}, tmp)
             self.assertEqual(result_.returncode, 0, result_.stderr)
 
 
@@ -833,7 +836,8 @@ class Workflow(unittest.TestCase):
             '  --reference "$REFERENCE" \\\n'
             '  --vuln "$RUNNER_TEMP/trivy-images/out/vuln.json" \\\n'
             '  --secret "$RUNNER_TEMP/trivy-images/out/secret.json" \\\n'
-            '  --exceptions-file "$EXCEPTIONS_FILE"\n'))
+            '  --exceptions-file "$EXCEPTIONS_FILE" \\\n'
+            '  --secret-allowlist-file "$SECRET_ALLOWLIST_FILE"\n'))
         for token in ("||", "&&", ";", "set +e", "|| true", "|", "&", "trap", "exit", "$?"):
             self.assertNotIn(token, script)
         lines = [l for l in step(self.text, "Gate image").splitlines() if not l.lstrip().startswith("#")]

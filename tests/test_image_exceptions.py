@@ -757,7 +757,7 @@ class Scope(unittest.TestCase):
 
     def test_other_scripts_do_not_use_the_engine(self):
         for name in sorted(os.listdir(os.path.join(ROOT, "scripts"))):
-            if name.endswith(".py") and name not in ("image_exceptions.py", "trivy_images.py"):
+            if name.endswith(".py") and name not in ("image_exceptions.py", "trivy_images.py", "image_secret_allowlist.py"):
                 with open(os.path.join(ROOT, "scripts", name), encoding="utf-8") as handle:
                     self.assertNotRegex(handle.read(), r"image[-_]exceptions", name)
 
