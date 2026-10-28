@@ -78,7 +78,7 @@ Every reusable workflow takes these two optional inputs:
 
 | Input | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `upload-sarif` | boolean | `true` | Upload the SARIF reports to code scanning. `false` skips every upload step; the caller still grants `security-events: write`, because the workflow's permissions cap requires it. Use it in private user repositories without code scanning. |
+| `upload-sarif` | boolean | `true` | Upload the SARIF reports to code scanning. `false` skips every upload step (the [findings report](#findings-report) still lists the findings); the caller still grants `security-events: write`, because the workflow's permissions cap requires it. Use it in private user repositories without code scanning. |
 | `timeout-minutes` | number | `30` | Timeout of the scan job. The first step rejects anything but a whole number from 1 to 360 before any scan runs. |
 
 `trivy-image.yml` adds `image`, `digest` (both required), `registry-login`
@@ -374,6 +374,42 @@ A finding means the credential is already public: rotate it first.
 It uses the gitleaks release binary, checked against its published sha256,
 rather than the gitleaks GitHub Action.
 
+### Findings report
+
+`trivy.yml`, `semgrep.yml` and `gitleaks.yml` list what a failed check found,
+so the job page names the package, rule and location even with
+`upload-sarif: false` (no code scanning). After the scan, a `Report ... findings`
+step runs with `if: always()` (also when `upload-sarif` is `true`) and renders
+the SARIF the scan already wrote, using `scripts/sarif_report.py` under
+`python3 -I`:
+
+- the step summary gets a table per scan, most severe first, capped at 200
+  rows with a truncation note;
+- one `::error file=...,line=...::` annotation per finding, capped at 10 per
+  scan (GitHub shows at most 10 error annotations per step).
+
+Shown per finding: tool, rule or vulnerability id, severity, file path, line;
+for vulnerabilities also package, installed version, fixed version and title;
+for Semgrep the rule's static description (truncated, escaped); for gitleaks
+the short commit sha. **Never shown**: the matched secret text, Semgrep code
+snippets, SARIF `snippet` and `contextRegion` fields, fingerprints, and, for
+secret scanners (Trivy secrets, gitleaks), the result message. Secrets show
+rule, file and line only. Untrusted text goes through the same escaping as the
+image summaries (`clean()` and `cell()` of `scripts/trivy_images.py`).
+
+The report is fail-safe and never decides the job: the scan step alone does
+(it is not `continue-on-error`). The script exits 0 whatever happens. A
+missing or malformed SARIF is stated in the summary and as a warning, and the
+scan's own exit status stands. A failing report step cannot turn a passing job
+red, and it cannot turn a failing job green.
+
+`gitleaks` prints only a leak count to its log (no file, line or rule without
+`--verbose`, which is not set), so it gets the same redacted report from its
+SARIF. `gitleaks.yml` now also checks out this repository into
+`.strange-security` to run the script; the history scan does not read it.
+`trivy-image.yml` and `trivy-images.yml` are unchanged: they have their own
+summaries.
+
 ### Suppressions
 
 The policy is in [docs/SUPPRESSIONS.md](docs/SUPPRESSIONS.md): inline
@@ -415,6 +451,12 @@ pull request. They cover:
   the CLI under `python3 -I`, and the wiring of
   `trivy-images.yml` (the real registry-login steps of both image workflows run
   under bash against a stub `docker`);
+- `scripts/sarif_report.py` in `tests/test_sarif_report.py`: rendering for each
+  scanner, redaction (snippet, `contextRegion`, match, fingerprint and message
+  fields must not leak), escaping of hostile paths and messages, row and
+  annotation caps, missing and malformed input, an exit status of 0 in every
+  case, and the wiring of the report steps (`if: always()`, `python3 -I`, no
+  `continue-on-error` on the scans);
 - that every `uses:` in `.github/workflows` is a full 40-hex SHA with a
   `# vX.Y.Z` comment (only the gate's local calls are exempt);
 - the structure of the workflow files in `tests/test_workflows.py` (checker

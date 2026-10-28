@@ -116,6 +116,17 @@ jobs:
           sarif_file: ${{ runner.temp }}/semgrep/semgrep.sarif
           category: semgrep
 
+      # Findings in the step summary and as annotations, from the SARIF above,
+      # whether or not it is uploaded. No code snippets are shown. Always, so it
+      # runs after a failed scan; it exits 0 whatever happens, so it never
+      # changes the job result (only the scan decides).
+      - name: Report Semgrep findings
+        if: always()
+        run: |
+          python3 -I .strange-security/scripts/sarif_report.py --tool semgrep \
+            --sarif "$RUNNER_TEMP/semgrep/semgrep.sarif" \
+            || echo "::warning::The Semgrep findings report could not run"
+
       # Policy check on the caller's code (docs/SUPPRESSIONS.md), run from the
       # shared checkout with -I so the caller cannot influence the interpreter.
       # The shared checkout itself is not scanned. Last, with always(), so a

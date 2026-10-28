@@ -117,6 +117,19 @@ jobs:
             --skip-dirs .strange-security \
             --format sarif --output /src/trivy-vuln.sarif --exit-code 1 /src
 
+      # Findings of both scans in the step summary and as annotations, from the
+      # SARIF files the scans wrote, whether or not they are uploaded. Redacted:
+      # no secret text, only rule, file and line for secrets. Always, so it runs
+      # after a failed scan; it exits 0 whatever happens, so it never changes the
+      # job result (only the scan steps decide). python3 -I, from the shared checkout.
+      - name: Report Trivy findings
+        if: always()
+        run: |
+          python3 -I .strange-security/scripts/sarif_report.py --tool trivy-secret --sarif trivy-secret.sarif \
+            || echo "::warning::The Trivy secret findings report could not run"
+          python3 -I .strange-security/scripts/sarif_report.py --tool trivy-vuln --sarif trivy-vuln.sarif \
+            || echo "::warning::The Trivy vulnerability findings report could not run"
+
       # Code scanning takes one SARIF run per category. Vulnerabilities keep
       # the existing trivy category; secrets get their own.
       - name: Upload secret scan SARIF

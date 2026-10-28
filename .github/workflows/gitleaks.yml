@@ -53,6 +53,40 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # In a called workflow the github context belongs to the caller, so
+      # github.workflow_ref names the caller's workflow. job.workflow_repository
+      # and job.workflow_sha name this file's own repository and commit. Fail
+      # if they are empty: actions/checkout would silently fall back to the caller.
+      - name: Resolve shared workflow source
+        id: shared
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_repository or job.workflow_sha is empty"
+            exit 1
+          fi
+          echo "repository=$WORKFLOW_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
+      # The findings report script lives in this workflow's repository, so check
+      # it out at the exact commit this workflow file came from.
+      - name: Checkout shared workflow repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.shared.outputs.repository }}
+          ref: ${{ steps.shared.outputs.sha }}
+          path: .strange-security
+          persist-credentials: false
+
+      - name: Verify shared workflow checkout
+        env:
+          WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
+        run: |
+          test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
+          test -f .strange-security/scripts/sarif_report.py
+
       # Not the gitleaks GitHub Action (organisation licence key, one more action
       # to trust): the release binary, checked against its published sha256.
       # Dependabot does not track this pin; bump the version and hash together.
@@ -85,6 +119,17 @@ jobs:
           gitleaks git --no-banner --redact --exit-code 1 \
             --log-opts="-m --full-history --all --diff-filter=tuxdb" \
             --report-format sarif --report-path gitleaks.sarif .
+
+      # gitleaks logs only a leak count without --verbose, so this names rule,
+      # file, line and commit from the (already redacted) SARIF in the step
+      # summary and as annotations. Never the secret, the match or the commit
+      # author. Always, so it runs after a failed scan; it exits 0 whatever
+      # happens, so it never changes the job result (only the scan decides).
+      - name: Report gitleaks findings
+        if: always()
+        run: |
+          python3 -I .strange-security/scripts/sarif_report.py --tool gitleaks --sarif gitleaks.sarif \
+            || echo "::warning::The gitleaks findings report could not run"
 
       - name: Upload SARIF results
         if: ${{ always() && inputs.upload-sarif }}
