@@ -58,6 +58,56 @@ workflow of yours trips on it; the scans keep excluding `.strange-security`,
 which after the checkout is the only path of that name in the tree and holds
 the verified shared checkout.
 
+## Caller requirements
+
+A checklist for a repository that calls these workflows. Each item links to
+the section with the details.
+
+Enforced: the run fails without them.
+
+1. Grant `contents: read`, `actions: read` and `security-events: write` to the
+   calling job or workflow, also with `upload-sarif: false`. See
+   [Usage](#usage).
+2. Have no `.strange-security` path anywhere in the repository: no file,
+   directory or symlink, dangling or not, at any depth. See
+   [Security checks](#security-checks).
+3. Pass valid inputs: `timeout-minutes` from 1 to 360; `image` and `digest`
+   for `trivy-image.yml`; at most 20 images for `trivy-images.yml`, each
+   repository once, lowercase, with a tag and/or digest. See
+   [Inputs](#inputs), [Scanning a container image](#scanning-a-container-image)
+   and [Scanning several images](#scanning-several-images).
+4. For private images, set `registry-login: true` and map the
+   `registry-token` secret explicitly (a classic token with `read:packages`;
+   `secrets: inherit` cannot supply it). See
+   [Scanning a container image](#scanning-a-container-image).
+
+Enforced by the checks' own policy:
+
+5. Suppress a Semgrep finding only inline, as `nosemgrep: <rule-id>` with a
+   reason comment on the line above. No `.semgrepignore` entries for source
+   code, no directory excludes, no `--exclude-rule`. See
+   [docs/SUPPRESSIONS.md](docs/SUPPRESSIONS.md).
+6. If you use an image exceptions file or a secret allowlist, keep every entry
+   valid: bound to an image digest, reviewed by a named person, expiring within
+   31 days, and, for an allowlist entry, linked to https evidence. An expired or
+   invalid entry fails the job. See [Image exceptions](#image-exceptions),
+   [Image secret allowlist](#image-secret-allowlist) and
+   [docs/IMAGE_EXCEPTIONS.md](docs/IMAGE_EXCEPTIONS.md).
+
+Expected practice, not checked by the workflows:
+
+7. Call the workflows from a repository under `strangebasisdevs`, pinned by
+   full commit SHA with the release in a comment (`@<40-hex-sha> # vX.Y.Z`),
+   never a branch or tag. Let Dependabot move the pin. See [Usage](#usage).
+8. Review changes to `.semgrepignore`, `.trivyignore`, `trivy.yaml`,
+   `.gitleaks.toml`, `.gitleaksignore`, any `nosemgrep` line and any exception
+   or allowlist entry as security-relevant. List each suppression in the pull
+   request description. Point the repository's `CLAUDE.md` at
+   [docs/SUPPRESSIONS.md](docs/SUPPRESSIONS.md) instead of restating it. See
+   [Suppressions](#suppressions).
+9. Protect the exception and allowlist files with `CODEOWNERS` and branch
+   protection, so an entry cannot land without the reviewer it names.
+
 ## Usage
 
 Call the reusable workflows from jobs in a repository under
