@@ -537,6 +537,8 @@ the SARIF the scan already wrote, using `scripts/sarif_report.py` under
   rows with a truncation note;
 - one `::error file=...,line=...::` annotation per finding, capped at 10 per
   scan (GitHub shows at most 10 error annotations per step).
+  `file=` is the full literal path (only `%`, `:`, `,` and line breaks are escaped, nothing is trimmed or shortened);
+  a path over 4096 bytes gets no `file=`, and the finding is still counted in the summary.
 
 Shown per finding: tool, rule or vulnerability id, severity, file path, line;
 for vulnerabilities also package, installed version, fixed version and title;
@@ -546,7 +548,8 @@ snippets, SARIF `snippet` and `contextRegion` fields, fingerprints, and, for
 secret scanners (Trivy secrets, gitleaks) and Semgrep (which puts matched code in
 it), the result message. Secrets show
 rule, file and line only. Untrusted text goes through the same escaping as the
-image summaries (`clean()` and `cell()` of `scripts/trivy_images.py`). Paths are
+image summaries (`clean()` and `cell()` of `scripts/trivy_images.py`); `cell()` writes every source `&` as `&amp;`
+first, so text like `&#x202e;` or `&rlm;` in a name is shown literally and never acts as a character reference. Paths are
 repo-relative: a leading `/src/` (Semgrep's container mount) and `file://` are
 stripped, and a path with a `..` component is not shown. Trivy writes its paths
 percent-encoded (`dir/a%20b.env`), so for the Trivy reports (chosen by `--tool`, never by

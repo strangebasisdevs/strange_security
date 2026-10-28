@@ -93,8 +93,13 @@ _MARKDOWN_UNSAFE = {ord(c): "&#%d;" % ord(c) for c in "<>[]()!\\"}
 def cell(value, limit=200):
     """Untrusted text for a Markdown table cell or list item of the step summary:
     everything clean() does, plus no raw < > [ ] ( ) ! or backslash, and no URL
-    scheme separator or "www." that GitHub would turn into a link."""
-    text = clean(value, limit).replace("://", ":/ /")
+    scheme separator or "www." that GitHub would turn into a link.
+
+    Source ampersands become &amp; first, before this function writes any character
+    reference of its own, so no source text can form an active reference (named,
+    decimal or hex, with or without the semicolon, e.g. &#x202e; or &rlm;) and the
+    references written below are the only ones in the result."""
+    text = clean(value, limit).replace("&", "&amp;").replace("://", ":/ /")
     # GFM extended autolinks also turn a bare www.host into a link; the dot as a
     # character reference renders the same but is no longer a link.
     text = re.sub(r"(?i)(?<=www)\.", "&#46;", text)

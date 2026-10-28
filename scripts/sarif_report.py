@@ -114,6 +114,24 @@ def prop(value, limit=300):
     return text.replace("%", "%25").replace(":", "%3A").replace(",", "%2C")
 
 
+# The longest repo-relative path used as an annotation target. Longer paths are not
+# truncated (that could point at another file): file= is left out instead.
+MAX_FILE_BYTES = 4096
+
+
+def file_prop(path):
+    """The file= property value for a repo-relative path from path_of(): the full literal
+    path (no trimming, no length cap), escaped as a workflow command property (% : , CR
+    and LF), or None when it is longer than MAX_FILE_BYTES or holds ##[, another control or a
+    Unicode format character, so the annotation is written without file=."""
+    if not isinstance(path, str) or not path or len(path.encode("utf-8", "replace")) > MAX_FILE_BYTES:
+        return None
+    text = path.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if "##[" in text or _UNSAFE_PROPERTY.search(text) or any(unicodedata.category(c) == "Cf" for c in text):
+        return None
+    return text.replace(":", "%3A").replace(",", "%2C")
+
+
 def data(value, limit=300):
     """A workflow command message: clean() (no :: or ##[) with % escaped."""
     return clean(value, limit).replace("%", "%25")
@@ -389,8 +407,9 @@ def annotation(tool_name, kind, f):
         if f["message"]:
             text += ": " + f["message"]
     props = []
-    if f["file"]:
-        props.append("file=" + prop(f["file"]))
+    target = file_prop(f["file"])
+    if target is not None:
+        props.append("file=" + target)
         if f["line"]:
             props.append("line=%d" % f["line"])
     props.append("title=" + prop("%s %s" % (tool_name, f["rule"]), 120))

@@ -453,6 +453,30 @@ class Gate(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assert_cell_is_inert([l for l in summary.splitlines() if "CVE-2026-0003" in l][0], 7)
 
+    def test_source_ampersands_cannot_form_character_references(self):
+        for value in ("safe&#x202e;txt.exe", "config&#46;env", "&lt;b&gt;", "&amp;", "&#124;", "&#X202E",
+                      "&rlm;", "&ZeroWidthSpace;", "pkg&amp"):
+            cell = ti.cell(value)
+            with self.subTest(value=value):
+                self.assertNotRegex(cell, r"&(?!amp;|#\d{2,3};)")
+                self.assertIn("&amp;", cell)
+        self.assertEqual(ti.cell("&#46;"), "&amp;#46;")
+        # helper-generated references stay single
+        self.assertEqual(ti.cell("a&<b www.x"), "a&amp;&#60;b www&#46;x")
+        self.assertEqual(ti.cell("a‮b&"), "a&#92;u202eb&amp;")
+        # plain-text log output is not escaped
+        self.assertEqual(ti.clean("a&b"), "a&b")
+
+    def test_image_summary_neutralises_source_ampersands(self):
+        entity = "x&#x202e;y&rlm;&ZeroWidthSpace;&#46;"
+        hostile = vuln("CVE-2026-0004", PkgName="p" + entity, InstalledVersion="i" + entity,
+                       FixedVersion="f" + entity)
+        code, out, err, summary = self.run_gate(report(result([hostile], target="t" + entity)))
+        self.assertEqual(code, 1)
+        row = [l for l in summary.splitlines() if "CVE-2026-0004" in l][0]
+        self.assertNotRegex(row, r"&(?!amp;|#\d{2,3};)")
+        self.assertIn("px&amp;#x202e;y&amp;rlm;&amp;ZeroWidthSpace;&amp;#46;", row)
+
     def test_hostile_secret_fields_are_inert_in_the_summary(self):
         leaked = report(result(secrets=[secret(RuleID="r" + self.HOSTILE, Title="t" + self.HOSTILE)],
                                target="f" + self.HOSTILE))

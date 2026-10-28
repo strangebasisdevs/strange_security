@@ -564,6 +564,104 @@ class Hostile(unittest.TestCase):
         self.assertIn("...", summary)
 
 
+ENTITIES = ["safe&#x202e;txt.exe", "config&#46;env", "&lt;b&gt;", "&amp;", "&#124;", "&#X202E", "&rlm;",
+            "&ZeroWidthSpace;", "a&#8238", "x&amp"]
+# Every ampersand of the output is either the start of &amp; (the source ampersand) or one
+# of the decimal references the helper writes itself.
+ACTIVE_REFERENCE = re.compile(r"&(?!amp;|#\d{2,3};)")
+
+
+class CharacterReferences(unittest.TestCase):
+    def test_source_ampersands_are_neutralised_in_every_summary_field(self):
+        for tool in sr.TOOLS:
+            for entity in ENTITIES:
+                r = Runner(self)
+                rules = [{"id": "r" + entity, "shortDescription": {"text": "t" + entity},
+                          "fullDescription": {"text": "f" + entity}}]
+                r.write(sarif([result("r" + entity, vuln_message(package="p" + entity, installed="i" + entity,
+                                                                 fixed="v" + entity),
+                                      uri=entity + "/a" + entity + ".env", line=2)], rules))
+                _, summary, out = r.run(tool)
+                with self.subTest(tool=tool, entity=entity):
+                    self.assertIn("&amp;", summary)
+                    self.assertNotRegex(summary, ACTIVE_REFERENCE)
+
+    def test_the_documented_examples(self):
+        r = Runner(self)
+        r.write(sarif([result("rule.x", "m", uri="safe&#x202e;txt.exe", line=1),
+                       result("rule.y", "m", uri="config&#46;env", line=1)]))
+        _, summary, out = r.run("gitleaks")
+        self.assertIn("safe&amp;#x202e;txt.exe", summary)
+        self.assertIn("config&amp;#46;env", summary)
+        # Annotations are plain text: the literal name is kept, nothing is interpreted.
+        self.assertIn("file=safe&#x202e;txt.exe,", out)
+        self.assertIn("file=config&#46;env,", out)
+
+    def test_helper_references_are_kept_and_not_double_escaped(self):
+        self.assertEqual(sr.cell("a<b"), "a&#60;b")
+        self.assertEqual(sr.cell("a&b<c"), "a&amp;b&#60;c")
+        self.assertEqual(sr.cell("www.x.org"), "www&#46;x.org")
+        self.assertEqual(sr.cell("a@b"), "a&#64;b")
+        self.assertEqual(sr.cell("a‮b"), "a&#92;u202eb")
+        self.assertEqual(sr.cell("&#124;"), "&amp;#124;")
+        self.assertEqual(sr.cell("a|b"), "a/b")
+
+    def test_log_and_annotation_text_is_not_escaped(self):
+        self.assertEqual(sr.clean("a&b"), "a&b")
+        self.assertEqual(sr.data("a&#46;b"), "a&#46;b")
+        self.assertEqual(sr.prop("a&b"), "a&b")
+
+
+class AnnotationFile(unittest.TestCase):
+    def annotate(self, path, tool="semgrep"):
+        r = Runner(self)
+        r.write(sarif([result("rule.x", "m", uri=path, line=4)]))
+        code, summary, out = r.run(tool)
+        self.assertEqual(code, 0)
+        self.assertIn("**1 finding(s)**", summary)
+        self.assertEqual(out.count("::error "), 1)
+        return summary, out
+
+    def test_leading_and_trailing_spaces_are_kept(self):
+        for name in (" leading.env", "trailing.env ", "  both  .env"):
+            _, out = self.annotate(name)
+            self.assertIn("::error file=%s,line=4," % name, out)
+
+    def test_long_path_is_not_truncated(self):
+        name = "d/" + "a" * 299 + ".env"
+        self.assertGreater(len(name), 300)
+        _, out = self.annotate(name)
+        self.assertIn("file=%s,line=4," % name, out)
+        self.assertNotIn("...", out)
+        edge = "b" * sr.MAX_FILE_BYTES
+        self.assertEqual(sr.file_prop(edge), edge)
+
+    def test_separators_and_percent_are_escaped(self):
+        _, out = self.annotate("dir/a:b,c%d.env")
+        self.assertIn("file=dir/a%3Ab%2Cc%25d.env,line=4,", out)
+        self.assertEqual(sr.file_prop("a\r\nb"), "a%0D%0Ab")
+        self.assertEqual(sr.file_prop("100%:,"), "100%25%3A%2C")
+
+    def test_over_bound_path_omits_file_but_the_finding_is_counted(self):
+        name = "p" * (sr.MAX_FILE_BYTES + 1)
+        summary, out = self.annotate(name)
+        self.assertNotIn("file=", out)
+        self.assertNotIn("line=", out)
+        self.assertIn("::error title=Semgrep rule.x::", out)
+        self.assertIsNone(sr.file_prop(name))
+        # The bound counts bytes, not characters.
+        self.assertIsNone(sr.file_prop("é" * (sr.MAX_FILE_BYTES // 2 + 1)))
+
+    def test_title_and_display_text_keep_the_cap(self):
+        self.assertEqual(len(sr.prop("t" * 500, 120)), 120)
+        self.assertTrue(sr.prop("t" * 500, 120).endswith("..."))
+        self.assertEqual(sr.prop(" x "), "x")
+
+    def test_unsafe_characters_never_reach_file(self):
+        for name in ("a\x00b", "a‮b", "a##[b"):
+            self.assertIsNone(sr.file_prop(name), name)
+
+
 class Caps(unittest.TestCase):
     def test_rows_and_annotations_are_capped(self):
         r = Runner(self)
