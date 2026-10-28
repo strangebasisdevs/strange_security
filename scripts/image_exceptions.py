@@ -5,6 +5,10 @@ Used ONLY by trivy-images.yml, through scripts/trivy_images.py. The filesystem
 scan, gitleaks, Semgrep and trivy-image.yml never read an exceptions file, and
 a secret finding can never be excepted: the engine only ever sees fixable
 HIGH/CRITICAL vulnerabilities, and it rejects an entry that names a secret.
+A secret that is public by design has a separate file, schema and engine, in
+the sibling scripts/image_secret_allowlist.py; this file never reads it, and
+the sibling borrows only this file's date, reviewer, digest and strict-JSON
+helpers.
 
   image_exceptions.py validate FILE
       Schema check of an exceptions file (strict fields, no wildcards, digest
@@ -109,8 +113,12 @@ def _no_constant(name):
     raise ValueError("%s is not allowed in JSON" % name)
 
 
-def read_entries(path: str) -> list:
-    """The raw entry list of an exceptions file. Raises ExceptionsError."""
+def read_entries(path: str, key: str = "exceptions") -> list:
+    """The raw entry list of a file shaped {key: [...]}. Raises ExceptionsError.
+
+    The default key is the vulnerability exceptions file; the secret allowlist
+    (image_secret_allowlist.py) reads its own file through the same strict reader.
+    """
     try:
         with open(path, "rb") as handle:
             raw = handle.read(MAX_BYTES + 1)
@@ -122,11 +130,11 @@ def read_entries(path: str) -> list:
         data = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=_no_duplicate_keys, parse_constant=_no_constant)
     except (ValueError, RecursionError) as error:
         raise ExceptionsError("%s is not valid JSON: %s" % (_show(path), error))
-    if not isinstance(data, dict) or set(data) != {"exceptions"} or not isinstance(data["exceptions"], list):
-        raise ExceptionsError('%s: the top level must be exactly {"exceptions": [...]}' % _show(path))
-    if len(data["exceptions"]) > MAX_ENTRIES:
+    if not isinstance(data, dict) or set(data) != {key} or not isinstance(data[key], list):
+        raise ExceptionsError('%s: the top level must be exactly {"%s": [...]}' % (_show(path), key))
+    if len(data[key]) > MAX_ENTRIES:
         raise ExceptionsError("%s: more than %d entries" % (_show(path), MAX_ENTRIES))
-    return data["exceptions"]
+    return data[key]
 
 
 def schema_errors(entries: list, today: datetime.date) -> list[str]:
