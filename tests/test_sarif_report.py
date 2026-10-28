@@ -1145,8 +1145,8 @@ class GuardDetection(unittest.TestCase):
         ("bash", "      - name: n\n        if: failure()\n        run: bash .strange-security/run.sh\n"),
         ("dot slash", "      - name: n\n        if: ${{ !cancelled() }}\n        run: node ./.strange-security/x.js\n"),
         ("cd", "      - name: n\n        if: always()\n        run: |\n          cd .strange-security\n          ./go\n"),
-        ("docker build context", "      - name: n\n        if: always()\n        run: |\n          docker build \\n"
-                                 "            --file Dockerfile \\n            .strange-security\n"),
+        ("docker build context", "      - name: n\n        if: always()\n        run: |\n          docker build \\\n"
+                                 "            --file Dockerfile \\\n            .strange-security\n"),
         ("local action", "      - uses: ./.strange-security/actions/a\n        if: always()\n"),
         ("if first", "      - if: ${{ always() }}\n        run: sh .strange-security/x.sh\n"),
         ("folded if", "      - name: n\n        if: >-\n          always() &&\n          inputs.x\n"

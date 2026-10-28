@@ -125,6 +125,20 @@ jobs:
             echo "::error::The caller repository must not contain a .strange-security path (file, directory or symlink): the shared workflow source is checked out there and that path is excluded from the scans"
             exit 1
           fi
+          # The same rule at any depth: find does not follow symlinks, prunes only the
+          # top-level ./.git, and -name matches directories, files and symlinks (also
+          # dangling ones). If find fails (unreadable directory, ...) the step fails too.
+          list=$(mktemp) || { echo "::error::Could not create a temporary file to search the workspace for .strange-security paths"; exit 1; }
+          trap 'rm -f "$list"' EXIT
+          if ! find . -path ./.git -prune -o -name .strange-security -print0 >"$list"; then
+            echo "::error::Could not search the whole workspace for .strange-security paths, so none can be ruled out"
+            exit 1
+          fi
+          if [ -s "$list" ]; then
+            found=$(head -z -n 20 "$list" | tr '\0' ' ' | tr -c 'A-Za-z0-9._/ -' '?')
+            echo "::error::The caller repository must not contain a .strange-security path (file, directory or symlink) at any depth: the shared workflow source is checked out there and that path is excluded from the scans, found (first 20): $found"
+            exit 1
+          fi
 
       # The Dockerfile lives in this workflow's repository, so check it out at
       # the exact commit this workflow file came from.

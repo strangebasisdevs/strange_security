@@ -29,15 +29,25 @@ excluded from the scans. The commit comes from `job.workflow_repository` and
 describes the caller.
 
 **The caller repository must not contain a `.strange-security` path** of any
-kind: no file, directory or symlink (dangling or not). `actions/checkout`
+kind, at any depth: no file, directory or symlink (dangling or not), in the
+workspace root or in any subdirectory (`src/.strange-security/` counts). The
+top-level `.git` directory is the only place not searched. `actions/checkout`
 follows a symlink at its target path, and empties an existing directory that
 has no `.git` before cloning into it. A committed `.strange-security -> sub`
 would therefore send the shared checkout into the caller's own `sub/`, wipe
 it, and leave a genuine-looking checkout there, while the scans exclude
 `.strange-security` and so would scan the shared repository instead of `sub/`.
 A real caller directory of that name would be wiped and excluded the same way,
-never scanned. Each of these workflows therefore refuses such a path in a step
-before the shared checkout: the job fails with an error naming the path
+never scanned. The depth rule exists because Semgrep's `--exclude` is
+gitignore-style and unanchored: `--exclude .strange-security` also skips a
+nested `src/.strange-security/handler.py`, so a caller directory of that name
+anywhere in the tree would silently never be scanned by Semgrep. (Trivy's
+`--skip-dirs` is relative to the scan root and does not have this problem, but
+the rule is the same everywhere.) Each of these workflows therefore refuses
+such a path, found by a `find` that does not follow symlinks, in a step
+before the shared checkout; if that search itself fails (for example an
+unreadable directory) the step fails too, since nothing can then be ruled out.
+The job fails with an error naming up to 20 offending paths
 (`gitleaks.yml` instead skips its findings report with a warning, because its
 history scan does not need the shared checkout and still decides the job
 alone). The verify step then also requires that `.strange-security` is not a
@@ -45,7 +55,8 @@ symlink, that its physical path is `<workspace>/.strange-security`, and that
 it is the root of its own git repository (not a directory inside another
 one), on top of being at the expected commit. Rename or remove the path if a
 workflow of yours trips on it; the scans keep excluding `.strange-security`,
-which now only ever holds the verified shared checkout.
+which after the checkout is the only path of that name in the tree and holds
+the verified shared checkout.
 
 ## Usage
 

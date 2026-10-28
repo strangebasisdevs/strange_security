@@ -133,6 +133,33 @@ class Structure(unittest.TestCase):
             self.assertIn("[ -e .strange-security ] || [ -L .strange-security ]", block)
             self.assertNotIn("::warning::", block)
 
+    def test_every_precheck_searches_nested_paths_and_fails_closed(self):
+        """One rule everywhere: no .strange-security path at any depth of the caller tree."""
+        for name, job in GATING + NON_GATING:
+            block = next(s for s in job_steps(read(name), job) if step_label(s) == PRECHECK)
+            where = (name, job)
+            # the root test stays
+            self.assertIn("[ -e .strange-security ] || [ -L .strange-security ]", block, where)
+            # a search of the whole workspace, never following symlinks, pruning only ./.git
+            self.assertIn("find . -path ./.git -prune -o -name .strange-security -print0", block, where)
+            self.assertEqual(block.count("-prune"), 1, where)
+            self.assertEqual(block.count("find ."), 1, where)
+            self.assertNotRegex(block, r"find\s+-[LH]\b|-follow\b|-maxdepth|-mindepth|-xdev|-type\b", where)
+            # a failing find fails the step instead of passing it silently
+            self.assertIn("if ! find . ", block, where)
+            self.assertNotRegex(block, r"find [^\n]*\|", where)
+            self.assertNotIn("|| true", block, where)
+            self.assertNotIn("2>/dev/null", block, where)
+            self.assertNotRegex(block, r"(?m)^\s*set \+e", where)
+            # the offending paths are printed, bounded
+            self.assertIn("head -z -n 20", block, where)
+            self.assertIn('[ -s "$list" ]', block, where)
+            level, other = ("warning", "error") if (name, job) in NON_GATING else ("error", "warning")
+            self.assertIn("::%s::" % level, block, where)
+            self.assertNotIn("::%s::" % other, block, where)
+            self.assertEqual(block.count("exit 1"), 4, where)
+            self.assertIn("at any depth", block, where)
+
     def test_gitleaks_precheck_is_non_gating_and_gates_only_the_shared_checkout(self):
         text = read("gitleaks.yml")
         steps = job_steps(text, "gitleaks")
@@ -363,6 +390,186 @@ class RunBlocks(unittest.TestCase):
         self.plant("directory", tmp, work)
         self.run_block(self.block("trivy.yml", "trivy", PRECHECK), work)
         self.assertTrue(os.path.isdir(os.path.join(work, ".strange-security", "sub")))
+
+    # -- the pre-check at any depth ------------------------------------------------------
+
+    NESTED = ["nested directory with a file", "nested empty directory", "nested file",
+              "nested dangling symlink", "nested symlink to a directory"]
+
+    def plant_nested(self, kind, tmp, work):
+        """Plant a .strange-security below the root; the path relative to work, '/'-separated."""
+        if kind == "nested directory with a file":
+            relative = "sub/.strange-security"
+            os.makedirs(os.path.join(work, "sub", ".strange-security"))
+            with open(os.path.join(work, "sub", ".strange-security", "x.py"), "w", encoding="utf-8") as handle:
+                handle.write("x = 1\n")
+        elif kind == "nested empty directory":
+            relative = "a/b/.strange-security"
+            os.makedirs(os.path.join(work, "a", "b", ".strange-security"))
+        elif kind == "nested file":
+            relative = "deep/er/.strange-security"
+            os.makedirs(os.path.join(work, "deep", "er"))
+            with open(os.path.join(work, "deep", "er", ".strange-security"), "w", encoding="utf-8") as handle:
+                handle.write("x\n")
+        elif kind == "nested dangling symlink":
+            self.need_dir_links(tmp)
+            relative = "pkg/.strange-security"
+            os.makedirs(os.path.join(work, "pkg"))
+            self.dangling_link(os.path.join(work, "pkg", ".strange-security"), tmp)
+        elif kind == "nested symlink to a directory":
+            self.need_dir_links(tmp)
+            relative = "pkg/.strange-security"
+            os.makedirs(os.path.join(work, "pkg", "real"))
+            link_dir(os.path.join(work, "pkg", "real"), os.path.join(work, "pkg", ".strange-security"))
+        else:
+            raise AssertionError(kind)
+        return relative
+
+    def test_gating_precheck_fails_for_a_nested_path_and_names_it(self):
+        for name, job in GATING:
+            for kind in self.NESTED:
+                with self.subTest(workflow=name, job=job, planted=kind):
+                    tmp, work = self.workspace()
+                    relative = self.plant_nested(kind, tmp, work)
+                    done = self.run_block(self.block(name, job, PRECHECK), work)
+                    self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertIn("::error::The caller repository must not contain a .strange-security path",
+                                  done.stdout)
+                    self.assertIn("./" + relative, done.stdout)
+                    self.assertNotIn("::warning::", done.stdout)
+
+    def test_gitleaks_precheck_fails_only_itself_and_warns_for_a_nested_path(self):
+        script = self.block("gitleaks.yml", "gitleaks", PRECHECK)
+        for kind in self.NESTED:
+            with self.subTest(planted=kind):
+                tmp, work = self.workspace()
+                relative = self.plant_nested(kind, tmp, work)
+                done = self.run_block(script, work)
+                self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn("::warning::The caller repository must not contain a .strange-security path",
+                              done.stdout)
+                self.assertIn("./" + relative, done.stdout)
+                self.assertNotIn("::error", done.stdout)
+
+    def test_the_semgrep_case_a_nested_directory_holding_code_is_refused(self):
+        tmp, work = self.workspace()
+        os.makedirs(os.path.join(work, "src", ".strange-security"))
+        with open(os.path.join(work, "src", ".strange-security", "handler.py"), "w", encoding="utf-8") as handle:
+            handle.write("import os\n")
+        done = self.run_block(self.block("semgrep.yml", "semgrep", PRECHECK), work)
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("./src/.strange-security", done.stdout)
+
+    def test_precheck_lists_at_most_twenty_paths(self):
+        for name, job in GATING + NON_GATING:
+            with self.subTest(workflow=name, job=job):
+                _, work = self.workspace()
+                for index in range(30):
+                    os.makedirs(os.path.join(work, "d%02d" % index, ".strange-security"))
+                done = self.run_block(self.block(name, job, PRECHECK), work)
+                self.assertNotEqual(done.returncode, 0)
+                self.assertEqual(done.stdout.count("/.strange-security"), 20, done.stdout)
+                self.assertEqual(done.stdout.count("\n"), 1, done.stdout)
+
+    def test_precheck_neutralises_hostile_path_names_in_the_annotation(self):
+        _, work = self.workspace()
+        os.makedirs(os.path.join(work, "x%0A,error", ".strange-security"))
+        if os.name != "nt":  # Windows file names cannot hold ':' or a newline
+            os.makedirs(os.path.join(work, "x::error::boom", ".strange-security"))
+            os.makedirs(os.path.join(work, "line\nbreak", ".strange-security"))
+        done = self.run_block(self.block("trivy.yml", "trivy", PRECHECK), work)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(done.stdout.count("::error::"), 1, done.stdout)
+        self.assertEqual(done.stdout.count("\n"), 1, done.stdout)
+        self.assertNotIn("%", done.stdout)
+
+    def test_precheck_passes_for_lookalike_names_and_text(self):
+        for name, job in GATING + NON_GATING:
+            with self.subTest(workflow=name, job=job):
+                _, work = self.workspace()
+                lookalikes = [".strange-security-old", "strange-security", ".strange_security",
+                              ".strange-security.d", "x.strange-security"]
+                with open(os.path.join(work, "case-probe"), "w", encoding="utf-8") as handle:
+                    handle.write("x\n")
+                if not os.path.exists(os.path.join(work, "CASE-PROBE")):  # a case-sensitive file system
+                    lookalikes.append(".Strange-Security")
+                for lookalike in lookalikes:
+                    os.makedirs(os.path.join(work, "sub", lookalike))
+                    with open(os.path.join(work, "sub", lookalike, "f"), "w", encoding="utf-8") as handle:
+                        handle.write("x\n")
+                    with open(os.path.join(work, lookalike), "w", encoding="utf-8") as handle:
+                        handle.write("x\n")
+                with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as handle:
+                    handle.write("skip --exclude .strange-security and cd .strange-security\n")
+                with open(os.path.join(work, "sub", "run.sh"), "w", encoding="utf-8") as handle:
+                    handle.write("# .strange-security\n")
+                done = self.run_block(self.block(name, job, PRECHECK), work)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertEqual(done.stdout, "")
+
+    def test_precheck_ignores_a_path_inside_the_top_level_git_directory(self):
+        for name, job in GATING + NON_GATING:
+            with self.subTest(workflow=name, job=job):
+                _, work = self.workspace()
+                os.makedirs(os.path.join(work, ".git", "hooks", ".strange-security"))
+                with open(os.path.join(work, ".git", ".strange-security"), "w", encoding="utf-8") as handle:
+                    handle.write("x\n")
+                done = self.run_block(self.block(name, job, PRECHECK), work)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertEqual(done.stdout, "")
+
+    def test_precheck_still_looks_into_a_nested_git_directory(self):
+        """Only the top-level ./.git is pruned: a/.git is the caller's tree like any other."""
+        for name, job in GATING + NON_GATING:
+            with self.subTest(workflow=name, job=job):
+                _, work = self.workspace()
+                os.makedirs(os.path.join(work, "a", ".git", ".strange-security"))
+                done = self.run_block(self.block(name, job, PRECHECK), work)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertIn("./a/.git/.strange-security", done.stdout)
+
+    def test_precheck_fails_closed_when_find_fails(self):
+        """The search failing must never read as 'nothing found', even if find saw nothing."""
+        broken = {
+            "fails with nothing found": "find() { echo 'find: permission denied' >&2; return 1; }\n",
+            "fails after a partial listing": "find() { printf './ok\\0'; return 1; }\n",
+            "is missing": "find() { return 127; }\n",
+        }
+        for name, job in GATING + NON_GATING:
+            for how, shim in broken.items():
+                with self.subTest(workflow=name, job=job, find=how):
+                    _, work = self.workspace()
+                    done = self.run_block(shim + self.block(name, job, PRECHECK), work)
+                    self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+                    level, other = ("warning", "error") if name == "gitleaks.yml" else ("error", "warning")
+                    self.assertIn("::%s::Could not search the whole workspace" % level, done.stdout)
+                    self.assertNotIn("::%s::" % other, done.stdout)
+
+    @unittest.skipIf(os.name == "nt", "directory permissions cannot be taken away in this way on Windows")
+    def test_precheck_fails_closed_for_an_unreadable_subdirectory(self):
+        """A real find error: a directory that cannot be listed hides whatever is below it."""
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root reads every directory; the shimmed-find test covers the failing search")
+        for name, job in GATING + NON_GATING:
+            with self.subTest(workflow=name, job=job):
+                _, work = self.workspace()
+                locked = os.path.join(work, "src", "locked")
+                os.makedirs(os.path.join(locked, ".strange-security"))
+                os.chmod(locked, 0)
+                self.addCleanup(os.chmod, locked, 0o700)
+                done = self.run_block(self.block(name, job, PRECHECK), work)
+                self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertRegex(done.stdout, r"::(?:error|warning)::Could not search the whole workspace")
+
+    def test_precheck_removes_its_temporary_list(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        for planted in (True, False):
+            _, work = self.workspace()
+            if planted:
+                os.makedirs(os.path.join(work, "s", ".strange-security"))
+            self.run_block(self.block("trivy.yml", "trivy", PRECHECK), work, TMPDIR=tmpdir)
+            self.assertEqual(os.listdir(tmpdir), [])
 
     # -- Verify --------------------------------------------------------------------------
 

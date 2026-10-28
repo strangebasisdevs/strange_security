@@ -33,7 +33,10 @@ Rules:
   guards are: an argument list, no shell, a fixed binary path, validated inputs
   only, a timeout, and a test that pins all five.
 - No file or directory excludes, no `.semgrepignore` entries for source code,
-  and no `--exclude-rule`. Fix the code or suppress the one line.
+  and no `--exclude-rule`. Fix the code or suppress the one line. The one
+  exclusion the workflow itself makes is `.strange-security`, and Semgrep's
+  `--exclude` is unanchored, so the workflow refuses a `.strange-security` path
+  at any depth of your tree, to keep that exclusion from hiding your code.
 - Every suppression is listed in the pull request description, with its file,
   rule id and reason, so the reviewer sees each one.
 
