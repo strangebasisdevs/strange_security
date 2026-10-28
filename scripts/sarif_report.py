@@ -22,7 +22,7 @@ nor a passing job red.
 Never shown, by construction (only the fields below are read, nothing is copied
 wholesale): the matched secret text, source snippets, SARIF snippet and
 contextRegion fields, fingerprints, and for secret scanners (Trivy secrets,
-gitleaks) the result message. Read fields: rule id, level, location uri and
+gitleaks) the result message. Results with an accepted suppression are counted, not listed. Read fields: rule id, level, location uri and
 start line, the rule's static description (fullDescription, else shortDescription;
 never the result message, which Semgrep fills with matched code), and for Trivy vulnerabilities the
 Package, Installed Version, Fixed Version and Severity lines of the message.
@@ -148,9 +148,12 @@ def read_sarif(path):
 def path_of(uri):
     if not isinstance(uri, str):
         return ""
-    text = urllib.parse.unquote(uri)
-    if text.startswith("file://"):
-        text = text[len("file://"):]
+    # Only a real URI (file:// scheme) is percent-encoded. gitleaks, Semgrep and
+    # Trivy write plain paths: decoding those would turn a literal "a%20b" into
+    # "a b" and hide a literal "%2e%2e" component as "..".
+    text = uri
+    if text[:7].lower() == "file://":
+        text = urllib.parse.unquote(text[len("file://"):])
     # Semgrep scans /src inside its container: report repo-relative paths.
     if text.startswith("/src/"):
         text = text[len("/src/"):]
@@ -168,37 +171,78 @@ def line_of(region):
     return None
 
 
-def severity_of(result, rule, message):
-    found = _SEVERITY_LINE.search(message)
-    if found:
-        return found.group(1)
-    tags = _dict(rule.get("properties")).get("tags")
-    if isinstance(tags, list):
-        for tag in tags:
-            if isinstance(tag, str) and tag.upper() in TAG_SEVERITIES:
-                return tag.upper()
+def _level_severity(result, rule):
     level = result.get("level")
     if not isinstance(level, str):
         level = _dict(rule.get("defaultConfiguration")).get("level")
     if isinstance(level, str) and level in _LEVELS:
         return _LEVELS[level]
-    return "UNKNOWN"
+    return None
 
 
-def findings_of(sarif, kind):
-    """The findings of a parsed SARIF document, as plain dicts of the allowed fields."""
+def _tag_severity(rule):
+    tags = _dict(rule.get("properties")).get("tags")
+    if isinstance(tags, list):
+        for tag in tags:
+            if isinstance(tag, str) and tag.upper() in TAG_SEVERITIES:
+                return tag.upper()
+    return None
+
+
+def severity_of(result, rule, message=None):
+    """The severity label. message is the result message of a Trivy finding, or
+    None for every other tool: Semgrep interpolates matched code into its
+    message and gitleaks puts the file name in it, so there it is never read and
+    the label comes from the result level, then the rule (default level, tags).
+
+    For Trivy the rule tags (written from the advisory data) win over the message,
+    whose Package: and Artifact: lines come before the Severity: line and carry a
+    package or file name, which may contain a newline and a forged Severity: line."""
+    if message is None:
+        return _level_severity(result, rule) or _tag_severity(rule) or "UNKNOWN"
+    return _tag_severity(rule) or (
+        _SEVERITY_LINE.search(message).group(1) if _SEVERITY_LINE.search(message) else None
+    ) or _level_severity(result, rule) or "UNKNOWN"
+
+
+def suppressed(result):
+    """True when the result carries an accepted suppression (any kind, such as
+    the inSource kind Semgrep writes for an inline suppression). A suppression with status rejected or
+    underReview, or one that is malformed, does not hide the finding."""
+    entries = result.get("suppressions")
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("status", "accepted") == "accepted":
+            return True
+    return False
+
+
+def findings_of(sarif, kind, tool_name=""):
+    """(findings, suppressed count) of a parsed SARIF document: plain dicts of the
+    allowed fields, without the results that carry an accepted suppression.
+    Raises ReportError for a runs or results value of the wrong type."""
     runs = _dict(sarif).get("runs")
     if not isinstance(runs, list):
         raise ReportError("the SARIF file has no runs list")
-    found = []
+    found, hidden = [], 0
     for run in runs:
-        run = _dict(run)
+        if not isinstance(run, dict):
+            raise ReportError("the SARIF file has a run that is not an object")
         rules = _dict(_dict(run.get("tool")).get("driver")).get("rules")
         rules = [_dict(r) for r in rules] if isinstance(rules, list) else []
         by_id = {r["id"]: r for r in rules if isinstance(r.get("id"), str)}
         results = run.get("results")
-        for result in results if isinstance(results, list) else []:
-            result = _dict(result)
+        if results is None:
+            results = []
+        if not isinstance(results, list):
+            raise ReportError("the SARIF file has a results value that is not a list")
+        for result in results:
+            if not isinstance(result, dict):
+                raise ReportError("the SARIF file has a result that is not an object")
+            if suppressed(result):
+                hidden += 1
+                continue
             rule_id = result.get("ruleId")
             index = result.get("ruleIndex")
             rule = {}
@@ -214,7 +258,7 @@ def findings_of(sarif, kind):
             location = _dict(_dict(first).get("physicalLocation"))
             item = {
                 "rule": rule_id,
-                "severity": severity_of(result, rule, message),
+                "severity": severity_of(result, rule, message if tool_name == "Trivy" else None),
                 "file": path_of(_dict(location.get("artifactLocation")).get("uri")),
                 "line": line_of(location.get("region")),
             }
@@ -232,13 +276,13 @@ def findings_of(sarif, kind):
                 item["commit"] = commit[:12] if isinstance(commit, str) and _COMMIT.match(commit) else ""
             found.append(item)
     found.sort(key=lambda f: (SEVERITY_RANK.get(f["severity"], 4), f["file"], f["line"] or 0, f["rule"]))
-    return found
+    return found, hidden
 
 
 # ---------------------------------------------------------------- rendering
 
 
-def render(heading, tool_name, kind, sarif_name, findings=None, problem=None):
+def render(heading, tool_name, kind, sarif_name, findings=None, problem=None, hidden=0):
     """(summary markdown, annotation lines, warning lines)."""
     lines = ["### %s" % heading, ""]
     annotations, warnings = [], []
@@ -247,12 +291,14 @@ def render(heading, tool_name, kind, sarif_name, findings=None, problem=None):
                      "decides the job; open its log for the scanner's own output." % cell(problem, 300))
         warnings.append("%s report not available (%s)" % (tool_name, clean(problem, 200)))
         return "\n".join(lines) + "\n", annotations, warnings
+    note = " %d suppressed finding(s) (accepted suppression in the SARIF) are not listed." % hidden if hidden else ""
     if not findings:
-        lines.append("No findings in `%s`. The scan step alone decides whether the job passes." % cell(sarif_name, 100))
+        lines.append("No findings in `%s`.%s The scan step alone decides whether the job passes." % (
+            cell(sarif_name, 100), note))
         return "\n".join(lines) + "\n", annotations, warnings
     total = len(findings)
-    lines.append("**%d finding(s)** from `%s`. Secret values and code snippets are never shown here." % (
-        total, cell(sarif_name, 100)))
+    lines.append("**%d finding(s)** from `%s`. Secret values and code snippets are never shown here.%s" % (
+        total, cell(sarif_name, 100), note))
     lines.append("")
     if kind == "vuln":
         lines += ["| Severity | Vulnerability | Package | Installed | Fixed in | File | Line | Title |",
@@ -308,16 +354,16 @@ def annotation(tool_name, kind, f):
 def report(tool, sarif_path, summary_path, out, env):
     heading, tool_name, kind = TOOLS[tool]
     name = os.path.basename(sarif_path.replace("\\", "/"))
-    findings, problem = None, None
+    findings, problem, hidden = None, None, 0
     try:
         sarif = read_sarif(sarif_path)
         if sarif is None:
             problem = "the SARIF file %s does not exist (the scan may have failed before writing it)" % name
         else:
-            findings = findings_of(sarif, kind)
+            findings, hidden = findings_of(sarif, kind, tool_name)
     except ReportError as error:
         problem = str(error)
-    text, annotations, warnings = render(heading, tool_name, kind, name, findings, problem)
+    text, annotations, warnings = render(heading, tool_name, kind, name, findings, problem, hidden)
     target = summary_path or env.get("GITHUB_STEP_SUMMARY")
     if target:
         try:

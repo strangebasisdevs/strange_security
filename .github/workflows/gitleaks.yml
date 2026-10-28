@@ -53,26 +53,36 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The next three steps only fetch the findings report script. They are
+      # non-gating: continue-on-error keeps a failure here from failing the job or
+      # skipping the gitleaks install and scan, whose result alone decides the job.
+      # If any of them fails the report is skipped with a warning.
+      #
       # In a called workflow the github context belongs to the caller, so
       # github.workflow_ref names the caller's workflow. job.workflow_repository
-      # and job.workflow_sha name this file's own repository and commit. Fail
-      # if they are empty: actions/checkout would silently fall back to the caller.
+      # and job.workflow_sha name this file's own repository and commit. Stop if
+      # they are empty: actions/checkout would silently fall back to the caller.
       - name: Resolve shared workflow source
         id: shared
+        continue-on-error: true
         env:
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
-            echo "::error::job.workflow_repository or job.workflow_sha is empty"
+            echo "::warning::job.workflow_repository or job.workflow_sha is empty, the findings report is skipped"
             exit 1
           fi
           echo "repository=$WORKFLOW_REPOSITORY" >> "$GITHUB_OUTPUT"
           echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
       # The findings report script lives in this workflow's repository, so check
-      # it out at the exact commit this workflow file came from.
+      # it out at the exact commit this workflow file came from. Only after the
+      # source was resolved, never with the empty fallback to the caller.
       - name: Checkout shared workflow repository
+        id: shared_checkout
+        if: steps.shared.outcome == 'success'
+        continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.shared.outputs.repository }}
@@ -80,12 +90,20 @@ jobs:
           path: .strange-security
           persist-credentials: false
 
+      # The report runs only if this succeeded: the checkout is the exact commit
+      # and holds the script. The check stays strict; a failure only skips the report.
       - name: Verify shared workflow checkout
+        id: shared_verified
+        if: steps.shared_checkout.outcome == 'success'
+        continue-on-error: true
         env:
           WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
         run: |
-          test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
-          test -f .strange-security/scripts/sarif_report.py
+          head="$(git -C .strange-security rev-parse HEAD)" || head=""
+          if [ -z "$head" ] || [ "$head" != "$WORKFLOW_SHA" ] || [ ! -f .strange-security/scripts/sarif_report.py ]; then
+            echo "::warning::The shared workflow checkout could not be verified, the findings report is skipped"
+            exit 1
+          fi
 
       # Not the gitleaks GitHub Action (organisation licence key, one more action
       # to trust): the release binary, checked against its published sha256.
@@ -123,10 +141,11 @@ jobs:
       # gitleaks logs only a leak count without --verbose, so this names rule,
       # file, line and commit from the (already redacted) SARIF in the step
       # summary and as annotations. Never the secret, the match or the commit
-      # author. Always, so it runs after a failed scan; it exits 0 whatever
-      # happens, so it never changes the job result (only the scan decides).
+      # author. Runs after a failed scan too, but only from a verified shared
+      # checkout; it exits 0 whatever happens, so it never changes the job
+      # result (only the scan decides).
       - name: Report gitleaks findings
-        if: always()
+        if: always() && steps.shared_verified.outcome == 'success'
         run: |
           python3 -I .strange-security/scripts/sarif_report.py --tool gitleaks --sarif gitleaks.sarif \
             || echo "::warning::The gitleaks findings report could not run"
