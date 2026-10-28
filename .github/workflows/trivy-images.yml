@@ -12,9 +12,12 @@ on:
         type: string
       exceptions-file:
         description: >-
-          Path of the image exceptions file in the caller's repository. Not
-          supported until the exception engine release: a file that exists and
-          is not empty fails the job instead of being ignored.
+          Path of the image exceptions file in the caller's repository
+          (docs/IMAGE_EXCEPTIONS.md). A missing file means no exceptions. A
+          file that exists but is not valid fails the job. An entry binds one
+          vulnerability in one package to one image sha256 digest, with a
+          reason, a reviewer and an expiry of at most 31 days; it never
+          applies to a secret, and not to an image listed without a digest.
         required: false
         default: .github/image-exceptions.json
         type: string
@@ -169,6 +172,7 @@ jobs:
           test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
           test -d .strange-security/scanner-images
           test -f .strange-security/scripts/trivy_images.py
+          test -f .strange-security/scripts/image_exceptions.py
 
       # Image version lives in scanner-images/trivy.Dockerfile, the single spot Dependabot updates.
       - name: Build Trivy image
@@ -240,9 +244,11 @@ jobs:
             --format json --output /out/vuln.json --exit-code 0 \
             "$REFERENCE"
 
-      # Fail-closed: any fixable HIGH or CRITICAL vulnerability, any secret, a
-      # missing or malformed report, or a non-empty exceptions file fails the
-      # job. Writes the step summary. Runs after both scans succeeded.
+      # Fail-closed: any fixable HIGH or CRITICAL vulnerability that no valid,
+      # unexpired, digest-bound exception covers, any secret, an expired
+      # exception, a missing or malformed report, or an invalid exceptions file
+      # fails the job. The script's exit status is the job status. Writes the
+      # step summary. Runs after both scans succeeded.
       - name: Gate image
         id: gate
         env:

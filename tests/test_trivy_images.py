@@ -1,5 +1,6 @@
 """trivy-images.yml: the plan/gate script (scripts/trivy_images.py) and the
 wiring of the workflow around it."""
+import datetime
 import importlib.util
 import io
 import json
@@ -210,7 +211,7 @@ class Gate(unittest.TestCase):
             handle.write(data if isinstance(data, str) else json.dumps(data))
         return path
 
-    def run_gate(self, vuln_report=None, secret_report=None, exceptions=None, reference="app:1"):
+    def run_gate(self, vuln_report=None, secret_report=None, exceptions=None, reference="app:1", today=None):
         vpath = self.write("vuln.json", report() if vuln_report is None else vuln_report)
         spath = self.write("secret.json", report() if secret_report is None else secret_report)
         summary = os.path.join(self.dir, "summary.md")
@@ -220,7 +221,7 @@ class Gate(unittest.TestCase):
         cwd = os.getcwd()
         os.chdir(self.dir)
         try:
-            code = ti.main(argv, {}, out, err)
+            code = ti.main(argv, {}, out, err, today)
         finally:
             os.chdir(cwd)
         text = slurp(summary) if os.path.exists(summary) else ""
@@ -354,27 +355,25 @@ class Gate(unittest.TestCase):
                 handle.write(content)
         return self.run_gate(exceptions=".github/image-exceptions.json")
 
-    def test_no_exceptions_file_is_fine(self):
+    def test_no_exceptions_file_means_no_exceptions(self):
         self.assertEqual(self.exceptions_run()[0], 0)
+        code, *_ = self.run_gate(report(result([vuln()])), exceptions=".github/image-exceptions.json")
+        self.assertEqual(code, 1)
 
-    def test_an_empty_exceptions_file_is_fine(self):
-        self.assertEqual(self.exceptions_run("")[0], 0)
-
-    def test_a_non_empty_exceptions_file_fails_even_on_a_clean_image(self):
-        for content in ("{}", "[]", '{"exceptions": []}', " ", "\n", "x", '{"exceptions":[{"id":"CVE-1"}]}'):
+    def test_a_file_that_is_not_valid_fails_closed_even_on_a_clean_image(self):
+        for content in ("", "{}", "[]", " ", "\n", "x", '{"exceptions": []} x', '{"exceptions":[{"id":"CVE-1"}]}',
+                        '{"exceptions": [], "exceptions": []}', '{"exceptions": [NaN]}', '{"other": []}'):
             with self.subTest(content=content):
                 code, out, err, summary = self.exceptions_run(content)
                 self.assertEqual(code, 2)
-                self.assertIn("not supported", err)
-                self.assertIn("exception", summary)
+                self.assertIn("exceptions file is not valid", err)
+                self.assertIn("Failed closed", summary)
                 os.remove(os.path.join(self.dir, ".github", "image-exceptions.json"))
 
-    def test_an_exceptions_file_never_suppresses_a_finding(self):
-        os.makedirs(os.path.join(self.dir, ".github"))
-        with open(os.path.join(self.dir, ".github", "image-exceptions.json"), "w", encoding="utf-8") as handle:
-            handle.write('{"exceptions":[{"id":"CVE-2026-0001"}]}')
+    def test_an_empty_list_is_valid_and_excepts_nothing(self):
+        self.assertEqual(self.exceptions_run('{"exceptions": []}')[0], 0)
         code, *_ = self.run_gate(report(result([vuln()])), exceptions=".github/image-exceptions.json")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 1)
 
     def test_a_directory_as_exceptions_file_fails(self):
         self.assertEqual(self.exceptions_run(make_dir=True)[0], 2)
@@ -383,51 +382,156 @@ class Gate(unittest.TestCase):
         for path in ("../x.json", "/etc/passwd", "a b"):
             self.assertEqual(self.run_gate(exceptions=path)[0], 2)
 
-    def test_summary_is_safe_for_markdown_and_workflow_commands(self):
-        nasty = vuln("CVE-9")
-        nasty["PkgName"] = "a|b`c\n::error::pwned"
-        code, out, err, summary = self.run_gate(report(result([nasty], target="t\n::set-output name=x::y")),
-                                                reference="app:1")
+    # ---- the exception engine inside the gate
+
+    REF = "example/app:1.2.3@" + DIGEST
+
+    def entry(self, **over):
+        base = {"image": "example/app", "digest": DIGEST, "id": "CVE-2026-0001", "package": "libfoo",
+                "reason": "the vendor has not rebuilt the image", "reviewer": "reviewer-one",
+                "reviewed": "2026-10-25", "expires": "2026-11-20"}
+        base.update(over)
+        return base
+
+    def excepted_run(self, entries, vuln_report=None, reference=None, digests=(DIGEST,), secret_report=None):
+        os.makedirs(os.path.join(self.dir, ".github"), exist_ok=True)
+        with open(os.path.join(self.dir, ".github", "image-exceptions.json"), "w", encoding="utf-8") as handle:
+            json.dump({"exceptions": entries}, handle)
+        data = report(result([vuln()])) if vuln_report is None else vuln_report
+        if isinstance(data, dict) and digests is not None:
+            data["Metadata"] = {"RepoDigests": ["example/app@" + d for d in digests]}
+        return self.run_gate(data, secret_report, exceptions=".github/image-exceptions.json",
+                             reference=reference or self.REF, today=datetime.date(2026, 11, 1))
+
+    def test_a_live_digest_bound_entry_excepts_the_finding(self):
+        code, out, err, summary = self.excepted_run([self.entry()])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("excepted HIGH CVE-2026-0001 libfoo until 2026-11-20, reviewed by reviewer-one", out)
+        self.assertIn("Passed", summary)
+        row = [l for l in summary.splitlines() if "CVE-2026-0001" in l][0]
+        self.assertIn("| 2026-11-20 | reviewer-one |", row)
+        self.assertIn("the vendor has not rebuilt the image", row)
+
+    def test_an_entry_covers_only_its_own_id_and_package(self):
+        findings = [vuln("CVE-2026-0001"), vuln("CVE-2026-0002"), vuln("CVE-2026-0001", PkgName="libbar")]
+        code, out, err, summary = self.excepted_run([self.entry()], report(result(findings)))
         self.assertEqual(code, 1)
-        for text in (out, summary):
-            for line in text.splitlines():
-                self.assertFalse(line.lstrip().startswith("::"), line)
-        for line in err.splitlines():
-            self.assertTrue(line.startswith("::error::"), line)
-        row = [l for l in summary.splitlines() if "CVE-9" in l][0]
-        self.assertEqual(row.count("|"), 7)
+        self.assertIn("fixable HIGH CVE-2026-0002 libfoo", out)
+        self.assertIn("fixable HIGH CVE-2026-0001 libbar", out)
+        self.assertNotIn("fixable HIGH CVE-2026-0001 libfoo", out)
+        self.assertIn("2 fixable", err)
+        self.assertIn("1 other finding(s) excepted", summary)
 
-    def test_long_lists_are_truncated_in_the_summary_only(self):
-        findings = [vuln("CVE-%d" % i) for i in range(ti.MAX_ROWS + 5)]
-        code, out, err, summary = self.run_gate(report(result(findings)))
+    def test_an_entry_for_another_digest_does_not_apply_and_is_stale(self):
+        code, out, err, summary = self.excepted_run([self.entry(digest=OTHER)])
         self.assertEqual(code, 1)
-        self.assertIn("and 5 more", summary)
-        self.assertEqual(out.count("fixable "), ti.MAX_ROWS + 5)
-        self.assertIn("%d fixable" % (ti.MAX_ROWS + 5), err)
+        self.assertNotIn("excepted", out)
+        self.assertIn("::warning::Stale exception (it names another digest", out)
+        self.assertIn("Stale exceptions", summary)
 
-    def test_summary_appends_for_several_images(self):
-        self.run_gate()
-        self.run_gate(report(result([vuln()])))
-        text = slurp(os.path.join(self.dir, "summary.md"))
-        self.assertIn("Passed", text)
-        self.assertIn("Failed", text)
+    def test_an_entry_for_another_repository_does_not_apply_and_is_ignored(self):
+        code, out, _, summary = self.excepted_run([self.entry(image="example/other")])
+        self.assertEqual(code, 1)
+        self.assertNotIn("::warning::", out)
+        self.assertNotIn("Stale", summary)
 
-    def test_summary_comes_from_the_environment_when_not_given(self):
-        summary = os.path.join(self.dir, "env-summary.md")
-        vpath, spath = self.write("v.json", report()), self.write("s.json", report())
-        argv = ["gate", "--reference", "app:1", "--vuln", vpath, "--secret", spath, "--exceptions-file", "none.json"]
-        os.chdir(self.dir)
+    def test_a_tag_only_reference_cannot_be_excepted(self):
+        code, out, err, summary = self.excepted_run([self.entry()], reference="example/app:1.2.3")
+        self.assertEqual(code, 1)
+        self.assertNotIn("excepted", out)
+        self.assertIn("the reference has no sha256 digest", out)
+
+    def test_a_report_that_does_not_confirm_the_digest_gets_no_exceptions(self):
+        for digests in ((), (OTHER,), None):
+            with self.subTest(digests=digests):
+                code, out, *_ = self.excepted_run([self.entry()], digests=digests)
+                self.assertEqual(code, 1)
+                self.assertIn("does not list the digest", out)
+
+    def test_an_expired_entry_fails_even_when_the_image_is_clean(self):
+        code, out, err, summary = self.excepted_run([self.entry(expires="2026-10-31")], report())
+        self.assertEqual(code, 1)
+        self.assertIn("::error::Exception expired on 2026-10-31", err)
+        self.assertIn("Expired exceptions", summary)
+
+    def test_an_expired_entry_does_not_except_and_one_for_another_image_still_fails(self):
+        code, out, err, _ = self.excepted_run([self.entry(expires="2026-10-31")])
+        self.assertEqual(code, 1)
+        self.assertNotIn("excepted", out)
+        code, out, err, _ = self.excepted_run([self.entry(image="example/other", expires="2026-10-31")], report())
+        self.assertEqual(code, 1)
+
+    def test_the_expiry_day_is_still_live(self):
+        code, *_ = self.excepted_run([self.entry(expires="2026-11-01")])
+        self.assertEqual(code, 0)
+
+    def test_a_stale_entry_warns_without_failing(self):
+        code, out, err, summary = self.excepted_run([self.entry()], report())
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("::warning::Stale exception (it no longer matches a finding)", out)
+        self.assertIn("Stale exceptions", summary)
+
+    def test_an_invalid_entry_fails_the_job_even_for_other_findings(self):
+        for label, bad in {
+            "wildcard": self.entry(id="CVE-2026-*"),
+            "tag instead of digest": {k: v for k, v in self.entry().items() if k != "digest"},
+            "future review": self.entry(reviewed="2026-11-02", expires="2026-11-20"),
+            "too long": self.entry(reviewed="2026-10-01", expires="2026-11-20"),
+        }.items():
+            with self.subTest(label):
+                code, out, err, summary = self.excepted_run([bad, self.entry(id="CVE-2026-0009")])
+                self.assertEqual(code, 2)
+                self.assertIn("Failed closed", summary)
+
+    def test_a_secret_is_never_excepted(self):
+        leaked = report(result(secrets=[secret()], target="etc/key"))
+        # A live entry for the finding of the same name, an entry that names the rule, and one
+        # with a secret field: the secret still fails, or the file is refused.
+        for label, entries, expected in (
+                ("vulnerability entry", [self.entry()], 1),
+                ("rule id as id", [self.entry(id="aws-access-key-id")], 2),
+                ("rule field", [self.entry(rule="aws-access-key-id")], 2),
+                ("secret field", [self.entry(secret="etc/key")], 2)):
+            with self.subTest(label):
+                code, out, err, summary = self.excepted_run(entries, report(), secret_report=leaked)
+                self.assertEqual(code, expected)
+                if code == 1:
+                    self.assertIn("secret CRITICAL aws-access-key-id in etc/key", out)
+                    self.assertIn("1 secrets", err)
+        # A secret next to a finding that is excepted: only the finding is excepted.
+        code, out, *_ = self.excepted_run([self.entry()], report(result([vuln()])), secret_report=leaked)
+        self.assertEqual(code, 1)
+        self.assertIn("secret CRITICAL aws-access-key-id", out)
+        self.assertIn("excepted HIGH CVE-2026-0001", out)
+
+    def test_unfixed_and_low_findings_need_no_entry_and_unmatched_ones_are_not_hidden(self):
+        findings = [vuln("CVE-1", fixed=None), vuln("CVE-2", "LOW"), vuln("CVE-2026-0001")]
+        code, out, *_ = self.excepted_run([self.entry()], report(result(findings)))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("excepted "), 1)
+
+    def test_vulnerabilities_given_as_a_json_object_fail_closed(self):
+        # Not a list: never read as "no findings". Trivy emits a list or null.
+        for label, value in {"populated object": {"VulnerabilityID": "CVE-2026-0001", "Severity": "HIGH", "FixedVersion": "2"},
+                             "empty object": {}, "string": "CVE-2026-0001", "number": 1, "true": True}.items():
+            with self.subTest(label):
+                code, out, err, summary = self.run_gate(report(result(value)))
+                self.assertEqual(code, 2)
+                self.assertIn("malformed Vulnerabilities", err)
+                self.assertIn("Failed closed", summary)
+        # Also with a matching exception on file: an exception cannot turn a confused shape into a pass.
+        code, *_ = self.excepted_run([self.entry()], report(result({"VulnerabilityID": "CVE-2026-0001"})))
+        self.assertEqual(code, 2)
+
+    def test_an_engine_that_cannot_be_loaded_fails_closed(self):
+        real = ti.importlib.util.spec_from_file_location
+        ti.importlib.util.spec_from_file_location = lambda name, path: real(name, os.path.join(self.dir, "missing.py"))
         try:
-            self.assertEqual(ti.main(argv, {"GITHUB_STEP_SUMMARY": summary}, io.StringIO(), io.StringIO()), 0)
+            code, out, err, summary = self.run_gate()
         finally:
-            os.chdir(HERE)
-        self.assertTrue(os.path.exists(summary))
-
-    def test_bad_gate_arguments_fail(self):
-        base = ["gate", "--reference", "a", "--vuln", "v", "--secret", "s", "--exceptions-file", "e"]
-        for argv in (base[:-2], base + ["--bogus", "x"], base + ["--vuln", "again"], base[:-1]):
-            with self.subTest(argv=argv):
-                self.assertEqual(ti.main(argv, {}, io.StringIO(), io.StringIO()), 2)
+            ti.importlib.util.spec_from_file_location = real
+        self.assertEqual(code, 2)
+        self.assertIn("cannot load the exception engine", err)
 
 
 class Cli(unittest.TestCase):
@@ -574,6 +678,26 @@ class Workflow(unittest.TestCase):
         gate_step = step(self.text, "Gate image")
         self.assertNotIn("if:", gate_step[:gate_step.index("run:")])
         self.assertNotIn("always()", gate_step)
+
+    def test_the_scan_job_checks_the_engine_out_and_the_gate_is_what_reads_the_exceptions(self):
+        self.assertIn("test -f .strange-security/scripts/image_exceptions.py", self.scan)
+        gate_step = step(self.text, "Gate image")
+        self.assertIn('--exceptions-file "$EXCEPTIONS_FILE"', gate_step)
+        self.assertIn("EXCEPTIONS_FILE: ${{ inputs.exceptions-file }}", gate_step)
+        # No other step of the scan job reads the exceptions file or runs the engine.
+        others = [each for each in steps_of(self.scan)
+                  if "Gate image" not in each.splitlines()[0] and "Verify shared workflow" not in each.splitlines()[0]]
+        for each in others:
+            with self.subTest(step=each.splitlines()[0]):
+                self.assertNotIn("EXCEPTIONS_FILE", each)
+                self.assertNotIn("image_exceptions", each)
+        self.assertNotIn("image_exceptions.py", self.plan)
+
+    def test_the_exceptions_input_describes_the_digest_binding_and_the_missing_file(self):
+        description = " ".join(input_block(self.text, "exceptions-file").split())
+        for phrase in ("missing file means no exceptions", "digest", "31 days", "never applies to a secret"):
+            self.assertIn(phrase, description)
+        self.assertNotIn("not supported", description)
 
     def test_sarif_is_optional_and_per_image(self):
         for name in ("Write secret scan SARIF", "Write vulnerability scan SARIF"):

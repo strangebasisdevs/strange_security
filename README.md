@@ -15,7 +15,7 @@ repositories. Results are uploaded to GitHub code scanning as SARIF.
 | `trivy.yml` | Secrets in the working tree, and filesystem dependency vulnerabilities | Any secret, at any severity; `HIGH` or `CRITICAL` vulnerabilities that have a fix |
 | `gitleaks.yml` | Secrets anywhere in the git history | Any finding |
 | `trivy-image.yml` | Secrets and OS/package vulnerabilities in one container image, by digest | Any secret, at any severity; `HIGH` or `CRITICAL` vulnerabilities that have a fix |
-| `trivy-images.yml` | The same checks on a list of images (`repo:tag`, `repo@sha256:...`), each in its own job | The same, decided by a fail-closed gate script; a non-empty exceptions file |
+| `trivy-images.yml` | The same checks on a list of images (`repo:tag`, `repo@sha256:...`), each in its own job | The same, decided by a fail-closed gate script, unless a [reviewed, digest-bound, expiring exception](docs/IMAGE_EXCEPTIONS.md) covers the vulnerability (never a secret); an expired exception; an invalid exceptions file |
 
 All of them run on `ubuntu-24.04`, check out the caller repository, and upload
 their SARIF reports even when a scan fails the job.
@@ -182,7 +182,7 @@ bundle, a compose stack, a base-image list). It does not replace
 | Input | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `images` | string | required | One reference per line: `repo:tag`, `repo@sha256:...` or `repo:tag@sha256:...`. Prefer a digest: a tag can move. At most 20, each repository once (each gets its own code scanning category). Whitespace inside a reference, shell metacharacters, uppercase letters, an empty list or a reference with neither tag nor digest fail before any scan. |
-| `exceptions-file` | string | `.github/image-exceptions.json` | Path of the exceptions file in the caller's repository. Exceptions are not supported yet (see below): a file that exists and is not empty fails the job. |
+| `exceptions-file` | string | `.github/image-exceptions.json` | Path of the exceptions file in the caller's repository ([schema and process](#image-exceptions)). A missing file means no exceptions; a file that exists but is not valid fails the job. |
 | `upload-sarif` | boolean | `true` | As for the other workflows. |
 | `timeout-minutes` | number | `30` | Timeout of each image's scan job, validated 1 to 360 by the first step. |
 | `registry-login` | boolean | `false` | Log in to `ghcr.io` with the `registry-token` secret before pulling. |
@@ -226,9 +226,71 @@ Rollout notes for a consumer:
 - Public images need no `registry-login` and no secret. For private ones,
   create a read-only package token, store it as a secret in the caller and pass
   it as `registry-token`; see the `trivy-image.yml` section above.
-- Do not commit an exceptions file yet. Until the exception engine release, a
-  non-empty `exceptions-file` is an error, not an ignored file. An empty file,
-  or none, is fine.
+- Without an exceptions file nothing is excepted, and that is the default. If
+  an image cannot be fixed yet, add exceptions as described under
+  [Image exceptions](#image-exceptions). A file that exists must be valid, an
+  empty file included, or the job fails. List the image with its digest, or no
+  exception can apply to it.
+
+### Image exceptions
+
+An exception lets `trivy-images.yml` pass a fixable `HIGH` or `CRITICAL`
+vulnerability that cannot be fixed yet. It is for `trivy-images.yml` image
+vulnerabilities only: never a secret, and never a filesystem (`trivy.yml`),
+gitleaks, Semgrep or `trivy-image.yml` finding. The process (who reviews, the
+monthly cadence, checking for a patched release, deleting stale entries and the
+renew pull request) is written once, in
+[docs/IMAGE_EXCEPTIONS.md](docs/IMAGE_EXCEPTIONS.md).
+
+`exceptions-file` (default `.github/image-exceptions.json`) is JSON with exactly
+one top-level key:
+
+```json
+{
+  "exceptions": [
+    {
+      "image": "ghcr.io/example/app",
+      "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "id": "CVE-2026-0001",
+      "package": "libfoo",
+      "reason": "The vendor has not rebuilt the image on the fixed libfoo yet",
+      "reviewer": "Your Name",
+      "reviewed": "2026-11-03",
+      "expires": "2026-12-03",
+      "tracking": "https://github.com/example/app/issues/123"
+    }
+  ]
+}
+```
+
+| Field | Required | Rule |
+| --- | --- | --- |
+| `image` | yes | The repository of the `images` line, without tag or digest, exactly as written there and lowercase (`ghcr.io/example/app`, `nextcloud`). |
+| `digest` | yes | `sha256:` and 64 lowercase hex characters. The entry applies only to the image scanned at this digest, so the `images` line must carry it. A tag, `latest` or an image listed by tag alone cannot be excepted. |
+| `id` | yes | The vulnerability id (`CVE-...`, `GHSA-...`, `GO-...`). A secret rule id is refused. |
+| `package` | yes | The package name Trivy reports. |
+| `reason` | yes | One line, 10 to 300 characters: why it is acceptable now. |
+| `reviewer` | yes | The person who reviewed it, never a bot or an agent. |
+| `reviewed` | yes | `YYYY-MM-DD` (UTC), not after today. |
+| `expires` | yes | `YYYY-MM-DD`, on or after `reviewed` and at most 31 days after it. The last day it is live. |
+| `tracking` | no | An `https://` link to the upstream issue or advisory. |
+
+Any other field is refused, so are duplicate keys, wildcards (`*`, `?`, `[`,
+`{`) in `image`, `digest`, `id` and `package`, duplicate entries and a field that
+names a secret (`secret`, `rule`, `RuleID`). A file that breaks any rule fails
+every image job; it is never partly applied. The gate excepts a finding only
+when the image, digest, id and package are all equal and the entry has not
+expired, and the Trivy report lists that digest. An entry that is expired fails
+the job (renew or delete it); a live entry that matches nothing is a warning
+(delete it). The step summary lists the excepted findings with their expiry,
+reviewer and reason, the stale entries as warnings, and the failing findings.
+
+`python3 -I scripts/image_exceptions.py validate FILE` checks a file, and
+`python3 -I scripts/image_exceptions.py generate --scan REF REPORT ...` writes a
+draft of entries from Trivy JSON reports for a person to review (see the
+process document). The draft has no reason, and no reviewer or date unless you
+give them; it does not validate until a person completes it, and the command
+never overwrites a file.
 
 ## Workflow behavior
 
@@ -279,18 +341,21 @@ vulnerabilities (every severity, nothing filtered). It then runs
 what decides the job:
 
 - it fails on any secret, and on any `HIGH` or `CRITICAL` vulnerability that
-  has a fixed version (the findings `trivy-image.yml` fails on);
-- it fails closed on a missing or malformed report and on an unexpected
-  severity, instead of passing;
-- it fails when the exceptions file exists and is not empty, with a message
-  that exceptions are not supported until the engine release;
-- it writes a step summary listing each failing image with its fixable
-  vulnerabilities (package, installed and fixed version) and its secrets
-  (rule, file and line; the matched text is never printed).
+  has a fixed version (the findings `trivy-image.yml` fails on) and that no
+  valid, unexpired exception bound to the image digest covers;
+- it fails closed on a missing or malformed report, an unexpected severity or
+  a field of the wrong type (for example `Vulnerabilities` given as an object),
+  instead of passing;
+- it fails on an expired exception, and on an exceptions file that exists but
+  is not valid; a missing file means no exceptions;
+- it writes a step summary listing the failing findings (package, installed
+  and fixed version) and secrets (rule, file and line; the matched text is
+  never printed), the excepted findings with their expiry and reviewer, and
+  the stale exceptions as warnings.
 
 Unlike `trivy-image.yml`, Trivy runs in an empty working directory, so a
 caller's `.trivyignore` and `trivy.yaml` do not apply: the exceptions file is
-the only suppression path, and it is not available yet. With `upload-sarif`
+the only suppression path ([Image exceptions](#image-exceptions)). With `upload-sarif`
 true, a second pass writes a secret and a `HIGH`/`CRITICAL` fixable
 vulnerability SARIF per image (the gate does not depend on it), uploaded to the
 `trivy-images-secret/<repository>` and `trivy-images/<repository>` categories,
@@ -339,9 +404,15 @@ pull request. They cover:
   upload step conditional, the exact permissions cap in every workflow without
   `packages`, the registry token as the only credential of the login steps, the
   gate exercising the opt-outs on the `trivy-image` and `trivy-images` jobs);
+- `scripts/image_exceptions.py` in `tests/test_image_exceptions.py`: the strict
+  schema, the digest binding, expiry and stale entries, the `generate` command
+  (it never defaults a date or a reviewer and never overwrites a file),
+  mutation checks that loosen the schema and the engine and expect the tests to
+  notice, and the rule that only `trivy-images.yml` uses an exceptions file;
 - `scripts/trivy_images.py` in `tests/test_trivy_images.py`: image list
-  validation, the fail-closed gate on Trivy JSON fixtures, exceptions-file
-  handling, summary safety, the CLI under `python3 -I`, and the wiring of
+  validation, the fail-closed gate on Trivy JSON fixtures (including
+  type-confused fields), the exception engine inside the gate, summary safety,
+  the CLI under `python3 -I`, and the wiring of
   `trivy-images.yml` (the real registry-login steps of both image workflows run
   under bash against a stub `docker`);
 - that every `uses:` in `.github/workflows` is a full 40-hex SHA with a
