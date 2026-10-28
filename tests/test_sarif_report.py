@@ -877,28 +877,93 @@ VERIFY_FILES = {
     "semgrep.yml": ["scripts/sarif_report.py", "scripts/check_suppressions.py"],
     "gitleaks.yml": ["scripts/sarif_report.py"],
 }
-RUNS_SHARED_SCRIPT = re.compile(r"\.strange-security/scripts/")
 ALWAYS_LIKE = re.compile(r"always\(\)|failure\(\)|cancelled\(\)")
 
 
 def workflow_steps(text):
-    """Each step of a workflow as its own text, split at the step name lines."""
-    return re.split(r"(?m)^(?=      - name:)", text)[1:]
+    """Each step of a workflow as its own text, split at every step list item
+    (a line starting with a dash at the indentation of the list under a steps: key),
+    named or not, so a step that starts with run:, uses: or if: is not missed."""
+    steps, current, indent, steps_key = [], None, None, None
+    for line in text.split("\n"):
+        stripped = line.strip()
+        here = len(line) - len(line.lstrip())
+        if steps_key is not None and stripped and not stripped.startswith("#") and here <= steps_key \
+                and not (here == steps_key and stripped.startswith("- ")):
+            steps_key, indent = None, None
+        if steps_key is None:
+            current = None
+            if re.match(r"^\s*steps:\s*$", line):
+                steps_key, indent = here, None
+            continue
+        if indent is None and stripped.startswith("- "):
+            indent = here
+        if indent is not None and here == indent and stripped.startswith("- "):
+            current = []
+            steps.append(current)
+        if current is not None:
+            current.append(line)
+    return ["\n".join(lines) for lines in steps]
+
+
+def step_label(block):
+    """The name of a step, or its first line if it has none."""
+    named = re.search(r"(?m)^\s*(?:- )?name:\s*(.*?)\s*$", block)
+    return named.group(1) if named else block.split("\n")[0].strip()
+
+
+def step_conditions(block):
+    """Every if: expression in a step block, folded and literal scalars joined."""
+    found, lines = [], block.split("\n")
+    for number, line in enumerate(lines):
+        match = re.match(r"^(\s*)(?:- )?if:\s*(.*)$", line)
+        if not match:
+            continue
+        value = match.group(2)
+        if value[:1] in ("|", ">"):
+            indent = len(match.group(1))
+            body = []
+            for following in lines[number + 1:]:
+                if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                    break
+                body.append(following.strip())
+            value = " ".join(body)
+        found.append(value)
+    return found
+
+
+# Configuration that merely names the shared checkout without running anything from it.
+SHARED_CONFIG = re.compile(r"(?:--skip-dirs|--exclude)(?:[ \t]+|=)[\"']?(?:\./)?\.strange-security(?![\w-])"
+                           r"|^[ \t]*(?:- )?path:[ \t]*[\"']?(?:\./)?\.strange-security[\"']?[ \t]*$", re.M)
+SHARED_REFERENCE = re.compile(r"\.strange-security(?![\w-])")
+
+
+def runs_shared_code(block):
+    """True if the step refers to the shared checkout anywhere but in path:/--skip-dirs/--exclude
+    configuration: a script of it (python, bash, node, ...), a cd into it, a docker build
+    context, a local action (uses: ./.strange-security/...), a working-directory, ... Comment
+    lines are ignored."""
+    code = "\n".join(line for line in block.split("\n") if not line.lstrip().startswith("#"))
+    return bool(SHARED_REFERENCE.search(SHARED_CONFIG.sub("", code)))
 
 
 def unguarded_shared_script_steps(text):
-    """Names of steps that run a shared-checkout script under always()/failure()/
-    !cancelled() without requiring the verified checkout."""
+    """Names of steps that run code from the shared checkout under always()/failure()/
+    !cancelled() without requiring the verified checkout, whatever their if: or name look like."""
     bad = []
     for block in workflow_steps(text):
-        if not RUNS_SHARED_SCRIPT.search(block):
+        if not runs_shared_code(block):
             continue
-        condition = re.search(r"(?m)^        if:(.*)$", block)
-        if condition and ALWAYS_LIKE.search(condition.group(1)) and VERIFIED not in condition.group(1):
-            bad.append(re.match(r"      - name: (.*)", block).group(1))
+        for condition in step_conditions(block):
+            if ALWAYS_LIKE.search(condition) and VERIFIED not in condition:
+                bad.append(step_label(block))
+                break
     return bad
+
+
 # gitleaks.yml steps that are allowed (and required) to be non-gating.
-GITLEAKS_SETUP = ["Resolve shared workflow source", "Checkout shared workflow repository",
+PRECHECK = "Refuse caller-planted .strange-security path"
+GITLEAKS_SETUP = ["Resolve shared workflow source", PRECHECK, "Checkout shared workflow repository",
                   "Verify shared workflow checkout"]
 
 
@@ -972,10 +1037,12 @@ class WorkflowWiring(unittest.TestCase):
 
     def test_gitleaks_report_setup_is_non_gating_and_the_scan_always_runs(self):
         text = read("gitleaks.yml")
-        ids = {"Resolve shared workflow source": "shared", "Checkout shared workflow repository": "shared_checkout",
+        ids = {"Resolve shared workflow source": "shared", PRECHECK: "shared_precheck",
+               "Checkout shared workflow repository": "shared_checkout",
                "Verify shared workflow checkout": "shared_verified"}
-        conditions = {"Resolve shared workflow source": None,
-                      "Checkout shared workflow repository": "steps.shared.outcome == 'success'",
+        conditions = {"Resolve shared workflow source": None, PRECHECK: None,
+                      "Checkout shared workflow repository":
+                          "steps.shared.outcome == 'success' && steps.shared_precheck.outcome == 'success'",
                       "Verify shared workflow checkout": "steps.shared_checkout.outcome == 'success'"}
         for title in GITLEAKS_SETUP:
             block = step(text, title)
@@ -1063,6 +1130,85 @@ class WorkflowWiring(unittest.TestCase):
         scan = scan[:scan.index("\n\n")]
         self.assertIn("--redact", scan)
         self.assertNotRegex(scan, r"--verbose|\s-v\b")
+
+
+def synthetic_workflow(*steps):
+    return "name: x\njobs:\n  j:\n    runs-on: ubuntu-24.04\n    steps:\n" + "".join(steps)
+
+
+class GuardDetection(unittest.TestCase):
+    """The generic guard test must see every way a step can run shared code, named or not."""
+
+    UNGUARDED = [
+        ("python", "      - run: python3 -I .strange-security/scripts/x.py\n        if: always()\n"),
+        ("python, other script dir", "      - name: n\n        if: always()\n        run: python3 .strange-security/tools/x.py\n"),
+        ("bash", "      - name: n\n        if: failure()\n        run: bash .strange-security/run.sh\n"),
+        ("dot slash", "      - name: n\n        if: ${{ !cancelled() }}\n        run: node ./.strange-security/x.js\n"),
+        ("cd", "      - name: n\n        if: always()\n        run: |\n          cd .strange-security\n          ./go\n"),
+        ("docker build context", "      - name: n\n        if: always()\n        run: |\n          docker build \\n"
+                                 "            --file Dockerfile \\n            .strange-security\n"),
+        ("local action", "      - uses: ./.strange-security/actions/a\n        if: always()\n"),
+        ("if first", "      - if: ${{ always() }}\n        run: sh .strange-security/x.sh\n"),
+        ("folded if", "      - name: n\n        if: >-\n          always() &&\n          inputs.x\n"
+                      "        run: python3 .strange-security/a.py\n"),
+        ("working directory", "      - name: n\n        if: always()\n        working-directory: .strange-security\n"
+                              "        run: python3 -I scripts/x.py\n"),
+        ("second condition", "      - name: n\n        if: inputs.x\n        run: python3 .strange-security/a.py\n"
+                             "      - name: m\n        if: always() && steps.other.outcome == 'success'\n"
+                             "        run: python3 .strange-security/a.py\n"),
+    ]
+    HARMLESS = [
+        ("skip-dirs", "      - name: n\n        if: always()\n        run: trivy fs --skip-dirs .strange-security /src\n"),
+        ("exclude", "      - name: n\n        if: always()\n        run: semgrep scan --exclude .strange-security /src\n"),
+        ("checkout path", "      - uses: actions/checkout@" + "0" * 40 + " # v1.0.0\n        if: always()\n"
+                          "        with:\n          path: .strange-security\n"),
+        ("guarded", "      - name: n\n        if: always() && " + VERIFIED + "\n        run: python3 -I .strange-security/scripts/x.py\n"),
+        ("folded guard", "      - name: n\n        if: >-\n          always() &&\n          " + VERIFIED + "\n"
+                         "        run: python3 -I .strange-security/scripts/x.py\n"),
+        ("default condition", "      - run: python3 -I .strange-security/scripts/x.py\n"),
+        ("success condition", "      - name: n\n        if: ${{ inputs.x }}\n        run: bash .strange-security/x.sh\n"),
+        ("comment only", "      - name: n\n        if: always()\n        run: |\n          # uses .strange-security/scripts/x.py\n          echo hi\n"),
+        ("no reference", "      - run: echo hi\n        if: always()\n"),
+    ]
+
+    def test_every_way_of_running_shared_code_without_the_guard_is_found(self):
+        for label, block in self.UNGUARDED:
+            with self.subTest(label):
+                self.assertEqual(len(unguarded_shared_script_steps(synthetic_workflow(block))), 1, block)
+
+    def test_configuration_guarded_and_default_steps_are_not_flagged(self):
+        for label, block in self.HARMLESS:
+            with self.subTest(label):
+                self.assertEqual(unguarded_shared_script_steps(synthetic_workflow(block)), [], block)
+
+    def test_steps_are_split_at_every_list_item(self):
+        text = synthetic_workflow("      - run: a\n", "      - uses: u@1\n", "      - name: n\n        run: b\n",
+                                  "      - if: x\n        run: c\n")
+        self.assertEqual(len(workflow_steps(text)), 4)
+        self.assertEqual(step_label(workflow_steps(text)[0]), "- run: a")
+
+    def test_lists_outside_steps_are_not_steps(self):
+        text = "on:\n  push:\n    branches:\n      - main\njobs:\n  j:\n    steps:\n      - run: a\n  k:\n    steps:\n      - run: b\n"
+        self.assertEqual([s.strip() for s in workflow_steps(text)], ["- run: a", "- run: b"])
+
+    def test_an_unnamed_always_step_in_a_real_workflow_is_found(self):
+        for name, title, _ in REPORT_STEPS:
+            text = read(name)
+            block = step(text, title)
+            unnamed = re.sub(r"\A- name: .*\n        ", "- ", block)
+            self.assertNotEqual(unnamed, block)
+            mutated = text.replace(block, unnamed.replace("always() && " + VERIFIED, "always()"))
+            self.assertEqual(len(unguarded_shared_script_steps(mutated)), 1, (name, title))
+            self.assertEqual(unguarded_shared_script_steps(text), [], name)
+
+    def test_the_real_workflows_still_pass_the_tightened_guard(self):
+        shared_steps = 0
+        for name in sorted(os.listdir(os.path.join(ROOT, ".github", "workflows"))):
+            if name.endswith(".yml"):
+                text = read(name)
+                self.assertEqual(unguarded_shared_script_steps(text), [], name)
+                shared_steps += sum(1 for block in workflow_steps(text) if runs_shared_code(block))
+        self.assertGreater(shared_steps, 10)
 
 
 @unittest.skipUnless(BASH, "bash is required")

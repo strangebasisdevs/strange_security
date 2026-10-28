@@ -34,10 +34,17 @@ def find_bash():
 BASH = find_bash()
 
 
-def extract_run_block(path, step_name):
-    """Return the run script of the named step, dedented."""
+def extract_run_block(path, step_name, job=None):
+    """Return the run script of the named step, dedented. With job, only that
+    job's steps are searched (a workflow may repeat a step name in several jobs)."""
     with open(path, encoding="utf-8") as handle:
         lines = handle.read().splitlines()
+    if job is not None:
+        first = next((i for i, line in enumerate(lines) if re.match(r"  " + re.escape(job) + r":\s*$", line)), None)
+        if first is None:
+            raise AssertionError("job not found: " + job)
+        last = next((i for i in range(first + 1, len(lines)) if re.match(r"  \S", lines[i])), len(lines))
+        lines = lines[first:last]
     start = next(
         (i for i, line in enumerate(lines) if re.match(r"\s*- name: " + re.escape(step_name) + r"\s*$", line)),
         None,
