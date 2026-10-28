@@ -308,6 +308,17 @@ class Gate(unittest.TestCase):
             "unknown severity": report(result([vuln(severity="SEVERE")])),
             "missing severity": report(result([{"VulnerabilityID": "x", "FixedVersion": "1"}])),
             "lowercase severity": report(result([vuln(severity="high")])),
+            "list severity": report(result([vuln(severity=["HIGH"])])),
+            "null severity": report(result([vuln(severity=None)])),
+            "list fixed version": report(result([vuln(fixed=["1.2.4"])])),
+            "number fixed version": report(result([vuln(fixed=124)])),
+            "object fixed version": report(result([vuln(fixed={"v": "1"})])),
+            "list fixed version, low severity": report(result([vuln(severity="LOW", fixed=["1"])])),
+            "list status": report(result([vuln(fixed=None, Status=["fixed"])])),
+            "number status": report(result([vuln(fixed=None, Status=1)])),
+            "list vulnerability id": report(result([vuln(vid=["CVE-1"])])),
+            "missing vulnerability id": report(result([{"PkgName": "x", "Severity": "HIGH", "FixedVersion": "1"}])),
+            "null vulnerability id": report(result([vuln(vid=None)])),
         }
         for label, data in bad.items():
             with self.subTest(label=label, report="vuln"):
@@ -316,7 +327,7 @@ class Gate(unittest.TestCase):
                 self.assertIn("::error::", err)
                 self.assertIn("Failed closed", summary)
             with self.subTest(label=label, report="secret"):
-                if label in ("unknown severity", "missing severity", "lowercase severity", "vulns not list", "vuln not object"):
+                if label in ("unknown severity", "missing severity", "lowercase severity", "vulns not list", "vuln not object") or label.startswith(("list ", "null ", "number ", "object ", "missing vuln")):
                     continue  # vulnerability-only shapes
                 code, *_ = self.run_gate(secret_report=data)
                 self.assertEqual(code, 2)

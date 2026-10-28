@@ -44,9 +44,8 @@ on:
     secrets:
       registry-token:
         description: >-
-          Read-only package token for ghcr.io (a personal access token with
-          read:packages, or a GitHub App installation token with packages
-          read). Only used when registry-login is true. Not GITHUB_TOKEN.
+          Read-only package token for ghcr.io (a personal access token (classic) with
+          read:packages; GitHub Packages only supports classic tokens). Only used when registry-login is true. Not GITHUB_TOKEN.
         required: false
 
 # Declared cap. A called workflow can only keep or reduce the token the caller

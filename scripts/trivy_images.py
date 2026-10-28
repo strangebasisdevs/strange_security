@@ -171,13 +171,22 @@ def fixable_vulnerabilities(results):
     found = []
     for result in results:
         for vuln in _items(result, "Vulnerabilities", "vulnerability"):
+            # Every field that decides pass or fail must have the right type, for
+            # findings of any severity: a confused type is never read as "no fix".
+            if not isinstance(vuln.get("VulnerabilityID"), str):
+                raise InputError("a vulnerability has a missing or non-string VulnerabilityID")
             severity = vuln.get("Severity")
-            if severity not in ALL_SEVERITIES:
+            if not isinstance(severity, str) or severity not in ALL_SEVERITIES:
                 raise InputError("a vulnerability has an unknown severity: " + clean(severity))
+            fixed = vuln.get("FixedVersion")
+            if fixed is not None and not isinstance(fixed, str):
+                raise InputError("a vulnerability has a non-string FixedVersion: " + clean(fixed))
+            status = vuln.get("Status")
+            if status is not None and not isinstance(status, str):
+                raise InputError("a vulnerability has a non-string Status: " + clean(status))
             if severity not in GATE_SEVERITIES:
                 continue
-            fixed = vuln.get("FixedVersion")
-            if (isinstance(fixed, str) and fixed.strip()) or vuln.get("Status") == "fixed":
+            if (fixed is not None and fixed.strip()) or status == "fixed":
                 found.append({
                     "id": clean(vuln.get("VulnerabilityID")),
                     "severity": severity,

@@ -142,8 +142,10 @@ The job is named `Trivy image scan`. The workflow scans exactly
 
 Public images need no login and no secret. For a private image, set
 `registry-login: true` and pass a read-only package token as the optional
-`registry-token` secret: a personal access token with `read:packages`, or a
-GitHub App installation token with `packages: read`. The workflow then runs
+`registry-token` secret: a personal access token (classic) with `read:packages`. GitHub Packages
+only supports authentication with a classic personal access token, so a
+GitHub App installation token or a fine-grained token is not documented to
+work. The workflow then runs
 `docker login ghcr.io` as `github.actor` with that token, through stdin (no
 third-party action), before it pulls. It fails with a clear error when
 `registry-login` is `true` and the secret is empty. `GITHUB_TOKEN` is never
