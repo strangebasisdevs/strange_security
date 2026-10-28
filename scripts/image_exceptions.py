@@ -58,7 +58,7 @@ DIGEST = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
 VULN_ID = re.compile(r"[A-Z][A-Za-z0-9]*-[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*", re.ASCII)
 PACKAGE = re.compile(r"[A-Za-z0-9@][A-Za-z0-9._+:@/~-]*", re.ASCII)
 REVIEWER = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._@+-]*", re.ASCII)
-REASON = re.compile(r"[^\x00-\x1f\x7f-\x9f  ]+")
+REASON = re.compile(r"[^\x00-\x1f\x7f-\x9f\u2028\u2029]+")
 TRACKING = re.compile(r"https://[\x21-\x7e]{1,280}", re.ASCII)
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 

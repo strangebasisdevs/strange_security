@@ -115,6 +115,7 @@ class Schema(unittest.TestCase):
             "long reason": entry(reason="x" * 301),
             "multiline reason": entry(reason="a long reason\nsecond line"),
             "control character in reason": entry(reason="a long reason\x1b[31m"),
+            "line separator in reason": entry(reason="a long reason" + chr(0x2028) + "more"),
             "reason with padding": entry(reason=" a long enough reason"),
             "empty reviewer": entry(reviewer=""),
             "reviewer with newline": entry(reviewer="Jane\nDoe"),
@@ -123,7 +124,7 @@ class Schema(unittest.TestCase):
             "bad date": entry(expires="2026-13-40"),
             "soon": entry(expires="soon"),
             "date with newline": entry(expires="2026-11-20\n"),
-            "date with other digits": entry(expires="٢٠٢٦-١١-٢٠"),
+            "date with other digits": entry(expires="\u0662\u0660\u0662\u0666-\u0661\u0661-\u0662\u0660"),
             "date with time": entry(expires="2026-11-20T00:00:00"),
             "32 days": entry(expires="2026-11-26"),
             "expires before review": entry(expires="2026-10-24"),
@@ -199,7 +200,7 @@ class Files(unittest.TestCase):
     def test_a_valid_file_loads(self):
         self.assertEqual(self.load(json.dumps({"exceptions": [entry()]})), [entry()])
         self.assertEqual(self.load('{"exceptions": []}'), [])
-        self.assertEqual(len(self.load("﻿" + json.dumps({"exceptions": [entry()]}))), 1)
+        self.assertEqual(len(self.load("\ufeff" + json.dumps({"exceptions": [entry()]}))), 1)
 
     def test_everything_else_is_refused(self):
         good = json.dumps(entry())
