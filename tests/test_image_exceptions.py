@@ -78,7 +78,7 @@ class Schema(unittest.TestCase):
         return ie.schema_errors(list(entries), today)
 
     def test_good_entries(self):
-        self.assertEqual(self.errors(entry(), entry(id="GHSA-abcd-1234-wxyz", tracking="https://example.org/x"),
+        self.assertEqual(self.errors(entry(), entry(id="GHSA-2345-jmpq-rvw2", tracking="https://example.org/x"),
                                      entry(package="@scope/pkg"), entry(package="github.com/a/b"),
                                      entry(image="localhost:5000/a/b", reviewer="Jane Doe")), [])
 
@@ -115,6 +115,12 @@ class Schema(unittest.TestCase):
             "ghsa uppercase groups": entry(id="GHSA-CFGH-JMPQ-RVWX"),
             "ghsa lowercase prefix": entry(id="ghsa-cfgh-jmpq-rvwx"),
             "ghsa letter outside the alphabet": entry(id="GHSA-cfgh-jmpq-rvwa"),
+            "ghsa bare digit": entry(id="GHSA-2"),
+            "ghsa uppercase digit groups": entry(id="GHSA-CFGH-JMPQ-RVW2"),
+            "ghsa digit outside the alphabet": entry(id="GHSA-cfgh-jmpq-rvw1"),
+            "ghsa two groups with digit": entry(id="GHSA-2345-jmpq"),
+            "ghsa four groups with digit": entry(id="GHSA-2345-jmpq-rvw2-cfgh"),
+            "ghsa mixed-case prefix": entry(id="Ghsa-2345-jmpq-rvw2"),
             "ghsa wildcard": entry(id="GHSA-cfgh-jmpq-rv*x"),
             "ghsa trailing newline": entry(id="GHSA-cfgh-jmpq-rvwx\n"),
             "empty package": entry(package=" "),
@@ -160,8 +166,17 @@ class Schema(unittest.TestCase):
     def test_a_digit_free_ghsa_id_validates(self):
         self.assertEqual(self.errors(entry(id="GHSA-cfgh-jmpq-rvwx")), [])
 
+    def test_every_positive_ghsa_example_matches_the_strict_pattern(self):
+        # Every GHSA id used as a valid example in the tests and docs is listed here.
+        strict = re.compile(r"GHSA(-[23456789cfghjmpqrvwx]{4}){3}")
+        for ghsa in ("GHSA-2345-jmpq-rvw2", "GHSA-cfgh-jmpq-rvwx"):
+            with self.subTest(ghsa):
+                self.assertTrue(strict.fullmatch(ghsa))
+                self.assertTrue(ie.VULN_ID.fullmatch(ghsa))
+                self.assertEqual(self.errors(entry(id=ghsa)), [])
+
     def test_secret_rule_ids_stay_refused_beside_ghsa(self):
-        for rid in ("aws-access-key-id", "github-pat", "ghsa-cfgh-jmpq-rvwx", "private-key"):
+        for rid in ("aws-access-key-id", "github-pat", "ghsa-cfgh-jmpq-rvwx", "gitlab-pat-v2", "private-key"):
             with self.subTest(rid):
                 self.assertIn("secrets never qualify", self.errors(entry(id=rid))[0])
 
