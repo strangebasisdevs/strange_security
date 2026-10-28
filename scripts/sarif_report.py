@@ -38,6 +38,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 import urllib.parse
 
@@ -128,38 +129,79 @@ def _text(value):
     return text if isinstance(text, str) else ""
 
 
+def _refuse_unsafe_file(mode):
+    if stat.S_ISLNK(mode):
+        raise ReportError("the SARIF path is a symbolic link, not a regular file")
+    if not stat.S_ISREG(mode):
+        raise ReportError("the SARIF path is not a regular file")
+
+
 def read_sarif(path):
+    """The parsed SARIF, or None if the path does not exist. Only a regular file
+    is opened (never a symlink, FIFO or device, and without blocking), and never
+    more than MAX_BYTES + 1 bytes are read: the size is judged from the bytes read,
+    not from a stat that a special or growing file can understate."""
     try:
-        size = os.path.getsize(path)
+        _refuse_unsafe_file(os.lstat(path).st_mode)
     except OSError:
         return None
-    if size > MAX_BYTES:
-        raise ReportError("the SARIF file is larger than %d MiB" % (MAX_BYTES // (1024 * 1024)))
+    flags = os.O_RDONLY
+    for name in ("O_BINARY", "O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
+        flags |= getattr(os, name, 0)
     try:
-        with open(path, "rb") as handle:
-            raw = handle.read()
-        return json.loads(raw.decode("utf-8-sig"))
+        fd = os.open(path, flags)
     except OSError as error:
         raise ReportError("the SARIF file cannot be read: " + clean(error, 100))
+    try:
+        _refuse_unsafe_file(os.fstat(fd).st_mode)
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            raw = handle.read(MAX_BYTES + 1)
+    except OSError as error:
+        raise ReportError("the SARIF file cannot be read: " + clean(error, 100))
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if len(raw) > MAX_BYTES:
+        raise ReportError("the SARIF file is larger than %d MiB" % (MAX_BYTES // (1024 * 1024)))
+    try:
+        return json.loads(raw.decode("utf-8-sig"))
     except (ValueError, RecursionError) as error:
         raise ReportError("the SARIF file is not valid JSON: " + clean(error, 100))
 
 
-def path_of(uri):
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def path_of(uri, decode=False):
+    """The repo-relative path of an artifact location URI, or "" if it is refused.
+
+    decode is True only for a producer known to write percent-encoded URIs, chosen
+    by the caller from the trusted --tool argument, never from the SARIF: Trivy
+    serialises the location through Go's url.Parse(...).String() (pkg/report/sarif.go),
+    so "dir/a b.env" arrives as "dir/a%20b.env". The URI is decoded exactly once and
+    the result is checked again (no control character, no absolute path, no "..")."""
     if not isinstance(uri, str):
         return ""
-    # Only a real URI (file:// scheme) is percent-encoded. gitleaks, Semgrep and
-    # Trivy write plain paths: decoding those would turn a literal "a%20b" into
+    # Without decode only a real URI (file:// scheme) is percent-encoded. gitleaks
+    # and Semgrep write plain paths: decoding those would turn a literal "a%20b" into
     # "a b" and hide a literal "%2e%2e" component as "..".
     text = uri
-    if text[:7].lower() == "file://":
-        text = urllib.parse.unquote(text[len("file://"):])
+    is_file_uri = text[:7].lower() == "file://"
+    if is_file_uri:
+        text = text[len("file://"):]
+    if decode or is_file_uri:
+        text = urllib.parse.unquote(text)
+        if _CONTROL.search(text):
+            return ""
     # Semgrep scans /src inside its container: report repo-relative paths.
     if text.startswith("/src/"):
         text = text[len("/src/"):]
     while text.startswith("./"):
         text = text[2:]
     if ".." in re.split(r"[/\\]", text):
+        return ""
+    if decode and (text.startswith(("/", "\\")) or re.match(r"[A-Za-z]:", text)):
         return ""
     return text
 
@@ -259,7 +301,7 @@ def findings_of(sarif, kind, tool_name=""):
             item = {
                 "rule": rule_id,
                 "severity": severity_of(result, rule, message if tool_name == "Trivy" else None),
-                "file": path_of(_dict(location.get("artifactLocation")).get("uri")),
+                "file": path_of(_dict(location.get("artifactLocation")).get("uri"), tool_name == "Trivy"),
                 "line": line_of(location.get("region")),
             }
             if kind == "vuln":

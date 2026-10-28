@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -179,8 +180,8 @@ class Rendering(unittest.TestCase):
         # Plain paths are literal: a %2e%2e component is a name, not "..".
         self.assertEqual(sr.path_of("/src/%2e%2e/x"), "%2e%2e/x")
 
-    def test_plain_paths_are_not_percent_decoded_for_any_tool(self):
-        for tool in sr.TOOLS:
+    def test_plain_paths_are_not_percent_decoded_for_semgrep_and_gitleaks(self):
+        for tool in ("semgrep", "gitleaks"):
             r = Runner(self)
             r.write(sarif([result("rule.x", "m", uri="config%20prod.env", line=2),
                            result("rule.y", "m", uri="/src/%2e%2e/%2e%2e/x.py", line=3)]))
@@ -189,6 +190,47 @@ class Rendering(unittest.TestCase):
             self.assertIn("config%20prod.env", summary, tool)
             self.assertNotIn("config prod.env", summary + out, tool)
             self.assertIn("%2e%2e/%2e%2e/x.py", summary, tool)
+
+    def test_trivy_paths_are_percent_decoded_once(self):
+        # Trivy writes artifact URIs through Go's url.Parse(...).String().
+        cases = {
+            "dir/a%20b.env": "dir/a b.env",
+            "dir/a%2520b.env": "dir/a%20b.env",
+            "file:///src/dir/a%20b.env": "dir/a b.env",
+            "plain/x.env": "plain/x.env",
+            "a%23b%3Fc.env": "a#b?c.env",
+        }
+        for uri, expected in cases.items():
+            self.assertEqual(sr.path_of(uri, True), expected, uri)
+        # Without the producer, a plain path stays literal.
+        self.assertEqual(sr.path_of("dir/a%20b.env"), "dir/a%20b.env")
+        self.assertEqual(sr.path_of("config%20prod.env"), "config%20prod.env")
+
+    def test_decoded_trivy_paths_are_checked_again(self):
+        for uri in ("%2e%2e/x", "%2E%2E/x", "a/%2e%2e/b", "a%2f%2e%2e%2fb", "a%5c..%5cb", "a%5c%2e%2e%5cb",
+                    "%00", "a%00b", "a%0ab", "a%0db", "a%1bb", "a%7fb", "a%c2%85b", "a%e2%80%a8b",
+                    "%2fetc/passwd", "%5cwindows", "C%3A/x", "file:///src/%2e%2e/x", "file:///etc/x"):
+            self.assertEqual(sr.path_of(uri, True), "", uri)
+
+    def test_trivy_report_decodes_and_semgrep_gitleaks_stay_literal(self):
+        results = [result("rule.x", "m", uri="dir/a%20b.env", line=2),
+                   result("rule.y", "m", uri="%2e%2e/etc/passwd", line=3),
+                   result("rule.z", "m", uri="a%0a::error::boom.env", line=4)]
+        for tool in ("trivy-vuln", "trivy-secret"):
+            r = Runner(self)
+            r.write(sarif(results))
+            code, summary, out = r.run(tool)
+            self.assertEqual(code, 0)
+            self.assertIn("dir/a b.env", summary, tool)
+            self.assertIn("file=dir/a b.env,", out, tool)
+            self.assertNotIn("passwd", summary + out, tool)
+            self.assertNotIn("::error::boom", summary + out, tool)
+        for tool in ("semgrep", "gitleaks"):
+            r = Runner(self)
+            r.write(sarif([result("rule.x", "m", uri="config%20prod.env", line=2)]))
+            _, summary, out = r.run(tool)
+            self.assertIn("config%20prod.env", summary, tool)
+            self.assertNotIn("config prod.env", summary + out, tool)
 
     def test_file_uris_are_decoded_for_any_tool(self):
         for tool in sr.TOOLS:
@@ -588,6 +630,129 @@ class FailSafe(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("::warning title=Findings report::the findings report failed", out.getvalue())
 
+    def run_path(self, path, tool="semgrep"):
+        out = io.StringIO()
+        summary = os.path.join(os.path.dirname(path), "summary.md")
+        code = sr.main(["--tool", tool, "--sarif", path, "--summary", summary], env={}, out=out)
+        text = ""
+        if os.path.exists(summary):
+            with open(summary, encoding="utf-8") as handle:
+                text = handle.read()
+        return code, text, out.getvalue()
+
+    def small_limit(self, limit):
+        original = sr.MAX_BYTES
+        sr.MAX_BYTES = limit
+        self.addCleanup(setattr, sr, "MAX_BYTES", original)
+
+    def test_regular_file_within_the_limit_is_read(self):
+        r = Runner(self)
+        r.write(sarif([result("rule.x", "m", uri="a.py", line=1)]))
+        code, summary, out = self.run_path(r.sarif_path)
+        self.assertEqual(code, 0)
+        self.assertIn("rule.x", summary)
+
+    def test_file_of_exactly_max_bytes_is_read_and_one_more_is_refused(self):
+        r = Runner(self)
+        body = json.dumps(sarif([result("rule.x", "m", uri="a.py", line=1)]))
+        self.small_limit(len(body) + 40)
+        r.write(body + " " * 40)
+        self.assertEqual(os.path.getsize(r.sarif_path), sr.MAX_BYTES)
+        _, summary, out = self.run_path(r.sarif_path)
+        self.assertIn("rule.x", summary)
+        self.assertEqual(out.count("::warning"), 0)
+        os.remove(os.path.join(r.dir.name, "summary.md"))
+        r.write(body + " " * 41)
+        _, summary, out = self.run_path(r.sarif_path)
+        self.assertNotIn("rule.x", summary)
+        self.assertIn("larger than", summary)
+        self.assertIn("::warning", out)
+
+    def test_read_never_reads_more_than_max_bytes_plus_one(self):
+        r = Runner(self)
+        self.small_limit(100)
+        r.write("[" + " " * 5000 + "]")
+        reads = []
+        real_fdopen = os.fdopen
+
+        def spy(fd, mode="r", *args, **kwargs):
+            handle = real_fdopen(fd, mode, *args, **kwargs)
+            real_read = handle.read
+
+            class Spy:
+                def read(self, size=-1):
+                    reads.append(size)
+                    return real_read(size)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    handle.close()
+
+            return Spy()
+
+        original = sr.os.fdopen
+        sr.os.fdopen = spy
+        try:
+            with self.assertRaises(sr.ReportError):
+                sr.read_sarif(r.sarif_path)
+        finally:
+            sr.os.fdopen = original
+        self.assertEqual(reads, [101])
+
+    def test_symlink_as_sarif_path_is_refused(self):
+        r = Runner(self)
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        target = os.path.join(outside.name, "real.sarif")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(sarif([result("rule.x", "m", uri="a.py", line=1)])))
+        try:
+            os.symlink(target, r.sarif_path)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks are not available here")
+        code, summary, out = self.run_path(r.sarif_path)
+        self.assertEqual(code, 0)
+        self.assertNotIn("rule.x", summary)
+        self.assertIn("symbolic link", summary)
+        self.assertIn("::warning", out)
+
+    def test_symlink_to_a_device_is_refused_without_reading(self):
+        r = Runner(self)
+        if not os.path.exists("/dev/zero"):
+            self.skipTest("no /dev/zero")
+        try:
+            os.symlink("/dev/zero", r.sarif_path)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks are not available here")
+        code, summary, out = self.run_path(r.sarif_path)
+        self.assertEqual(code, 0)
+        self.assertIn("::warning", out)
+
+    def test_fifo_as_sarif_path_is_refused_without_blocking(self):
+        r = Runner(self)
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("no mkfifo")
+        os.mkfifo(r.sarif_path)
+        code, summary, out = self.run_path(r.sarif_path)
+        self.assertEqual(code, 0)
+        self.assertIn("not a regular file", summary)
+        self.assertIn("::warning", out)
+
+    def test_special_file_swapped_in_after_the_check_is_refused(self):
+        # fstat of the open descriptor decides, not only the earlier lstat.
+        r = Runner(self)
+        r.write("{}")
+        original = sr.os.fstat
+        mode = stat.S_IFIFO | 0o600
+        sr.os.fstat = lambda fd: type("St", (), {"st_mode": mode})()
+        try:
+            with self.assertRaises(sr.ReportError):
+                sr.read_sarif(r.sarif_path)
+        finally:
+            sr.os.fstat = original
+
     def test_directory_as_sarif_path(self):
         r = Runner(self)
         out = io.StringIO()
@@ -627,7 +792,7 @@ class SharedEscaping(unittest.TestCase):
             raw = handle.read()
         raw.decode("ascii")
         imports = set(re.findall(rb"^(?:import|from) (\w+)", raw, re.M))
-        self.assertLessEqual(imports, {b"importlib", b"json", b"os", b"re", b"sys", b"urllib"})
+        self.assertLessEqual(imports, {b"importlib", b"json", b"os", b"re", b"stat", b"sys", b"urllib"})
 
 
 REPORT_STEPS = [
