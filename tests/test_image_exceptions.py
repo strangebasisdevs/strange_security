@@ -237,6 +237,10 @@ class Files(unittest.TestCase):
         try:
             os.symlink(target, link)
         except (OSError, NotImplementedError):
+            # Skipped only where the OS lacks symlink support (Windows without the privilege);
+            # on Linux and macOS (the ubuntu CI runner) a failure here is a failure of the test.
+            if os.name != "nt":
+                raise
             self.skipTest("symlinks are not available here")
         with self.assertRaises(ie.ExceptionsError):
             ie.load_exceptions(link, TODAY)
@@ -508,6 +512,11 @@ def probes(m):
     attempt("image binding", lambda: len(ev([entry(image="example/other")], [finding()])["failing"]) == 1)
     attempt("id binding", lambda: len(ev([entry()], [finding("CVE-2026-0003")])["failing"]) == 1)
     attempt("package binding", lambda: len(ev([entry()], [finding(package="libbaz")])["failing"]) == 1)
+    # The display copy equals the entry, the raw Trivy string does not (clean() maps "a|b" to "a/b",
+    # and drops a trailing NUL): the raw string decides.
+    attempt("raw strings decide", lambda: len(ev([entry(package="a/b")], [dict(finding(package="a/b"), raw_package="a|b")])["failing"]) == 1
+            and len(ev([entry()], [dict(finding(), raw_id="CVE-2026-0001\x00")])["failing"]) == 1
+            and len(ev([entry()], [dict(finding(), raw_package="libfoo ")])["failing"]) == 1)
     attempt("expired fails", lambda: len(ev([entry(expires="2026-10-31")], [])["expired"]) == 1)
     attempt("expired does not except", lambda: len(ev([entry(expires="2026-10-31")], [finding()])["failing"]) == 1)
     attempt("expiry day is live", lambda: len(ev([entry(expires="2026-11-01")], [finding()])["excepted"]) == 1)
@@ -562,14 +571,17 @@ def probes(m):
     return kept
 
 
+RAW_GET = '.get((finding.get("raw_id", finding["id"]), finding.get("raw_package", finding["package"])))'
+
 MUTATIONS = [
     # (name, [(old, new)], the promise it must break)
     ("digest ignored", [('for e in mine if e["digest"] == digest}', "for e in mine}")], "digest binding"),
     ("unknown digest matches any entry", [("bound = {} if digest is None else {", "bound = {"),
                                           ('if e["digest"] == digest}', 'if digest is None or e["digest"] == digest}')], "tag-only never excepted"),
     ("image ignored", [('>= today and e["image"] == repository]', ">= today]")], "image binding"),
-    ("id ignored", [('(e["id"], e["package"]): e for', 'e["package"]: e for'), ('.get((finding["id"], finding["package"]))', '.get(finding["package"])')], "id binding"),
-    ("package ignored", [('(e["id"], e["package"]): e for', 'e["id"]: e for'), ('.get((finding["id"], finding["package"]))', '.get(finding["id"])')], "package binding"),
+    ("id ignored", [('(e["id"], e["package"]): e for', 'e["package"]: e for'), (RAW_GET, '.get(finding["raw_package"])')], "id binding"),
+    ("package ignored", [('(e["id"], e["package"]): e for', 'e["id"]: e for'), (RAW_GET, '.get(finding["raw_id"])')], "package binding"),
+    ("cleaned copy matched", [(RAW_GET, '.get((finding["id"], finding["package"]))')], "raw strings decide"),
     ("expired not reported", [('expired = [e for e in entries if parse_date(e["expires"]) < today]', "expired = []")], "expired fails"),
     ("expired still live", [('parse_date(e["expires"]) >= today and e["image"] == repository', 'e["image"] == repository')], "expired does not except"),
     ("expiry day expired", [('parse_date(e["expires"]) >= today', 'parse_date(e["expires"]) > today')], "expiry day is live"),

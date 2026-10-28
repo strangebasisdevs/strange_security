@@ -63,6 +63,19 @@ def clean(value, limit=200):
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+# Characters that start Markdown or HTML structure (a link, an image, a raw tag, an
+# escape). In a step summary they are written as character references, which render
+# as the same visible character but never open a link, an image or a tag.
+_MARKDOWN_UNSAFE = {ord(c): "&#%d;" % ord(c) for c in "<>[]()!\\"}
+
+
+def cell(value, limit=200):
+    """Untrusted text for a Markdown table cell or list item of the step summary:
+    everything clean() does, plus no raw < > [ ] ( ) ! or backslash, and no URL
+    scheme separator that GitHub would turn into a link."""
+    return clean(value, limit).replace("://", ":/ /").translate(_MARKDOWN_UNSAFE)
+
+
 # ---------------------------------------------------------------- plan
 
 
@@ -203,10 +216,16 @@ def fixable_vulnerabilities(results):
             if severity not in GATE_SEVERITIES:
                 continue
             if (fixed is not None and fixed.strip()) or status == "fixed":
+                pkg = vuln.get("PkgName")
                 found.append({
+                    # id and package are for display only. An exception matches on the
+                    # raw Trivy strings (raw_id, raw_package), never on the cleaned copies:
+                    # clean() would make "a|b" equal "a/b" and drop a trailing space or NUL.
                     "id": clean(vuln.get("VulnerabilityID")),
+                    "raw_id": vuln["VulnerabilityID"],
                     "severity": severity,
-                    "package": clean(vuln.get("PkgName")),
+                    "package": clean(pkg),
+                    "raw_package": pkg if isinstance(pkg, str) else None,
                     "installed": clean(vuln.get("InstalledVersion")),
                     "fixed": clean(fixed),
                     "target": clean(result.get("Target")),
@@ -247,7 +266,7 @@ def _more(lines, total):
 
 
 def render_summary(reference, failing, secrets, excepted=(), stale=(), expired=()):
-    lines = ["### Trivy image: %s" % clean(reference), ""]
+    lines = ["### Trivy image: %s" % cell(reference), ""]
     if not failing and not secrets and not expired:
         if excepted:
             lines.append("Passed: no unexcepted fixable HIGH or CRITICAL vulnerability and no secret; "
@@ -266,19 +285,21 @@ def render_summary(reference, failing, secrets, excepted=(), stale=(), expired=(
                   "| --- | --- | --- | --- | --- | --- |"]
         for v in failing[:MAX_ROWS]:
             lines.append("| %s | %s | %s | %s | %s | %s |" % (
-                v["severity"], v["id"], v["package"], v["installed"], v["fixed"], v["target"]))
+                cell(v["severity"]), cell(v["id"]), cell(v["package"]), cell(v["installed"]), cell(v["fixed"]),
+                cell(v["target"])))
         _more(lines, len(failing))
     if secrets:
         lines += ["", "| Severity | Rule | Title | File | Line |", "| --- | --- | --- | --- | --- |"]
         for s in secrets[:MAX_ROWS]:
-            lines.append("| %s | %s | %s | %s | %s |" % (s["severity"], s["rule"], s["title"], s["target"], s["line"]))
+            lines.append("| %s | %s | %s | %s | %s |" % (
+                cell(s["severity"]), cell(s["rule"]), cell(s["title"]), cell(s["target"]), cell(s["line"])))
         _more(lines, len(secrets))
     if expired:
         lines += ["", "Expired exceptions (renew or delete them, see docs/IMAGE_EXCEPTIONS.md):", "",
                   "| Image | Vulnerability | Package | Expired | Reviewer |", "| --- | --- | --- | --- | --- |"]
         for e in expired[:MAX_ROWS]:
             lines.append("| %s | %s | %s | %s | %s |" % (
-                clean(e["image"]), clean(e["id"]), clean(e["package"]), clean(e["expires"]), clean(e["reviewer"])))
+                cell(e["image"]), cell(e["id"]), cell(e["package"]), cell(e["expires"]), cell(e["reviewer"])))
         _more(lines, len(expired))
     if excepted:
         lines += ["", "Excepted findings (a reviewed, expiring decision, not a pass):", "",
@@ -286,13 +307,13 @@ def render_summary(reference, failing, secrets, excepted=(), stale=(), expired=(
                   "| --- | --- | --- | --- | --- | --- | --- | --- |"]
         for v, e in excepted[:MAX_ROWS]:
             lines.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
-                v["severity"], v["id"], v["package"], v["installed"], v["fixed"],
-                clean(e["expires"]), clean(e["reviewer"]), clean(e["reason"], 100)))
+                cell(v["severity"]), cell(v["id"]), cell(v["package"]), cell(v["installed"]), cell(v["fixed"]),
+                cell(e["expires"]), cell(e["reviewer"]), cell(e["reason"], 100)))
         _more(lines, len(excepted))
     if stale:
         lines += ["", "Stale exceptions (warnings; delete them or fix them):", ""]
         for e, why in stale[:MAX_ROWS]:
-            lines.append("- %s %s %s: %s" % (clean(e["image"]), clean(e["id"]), clean(e["package"]), clean(why)))
+            lines.append("- %s %s %s: %s" % (cell(e["image"]), cell(e["id"]), cell(e["package"]), cell(why)))
         _more(lines, len(stale))
     return "\n".join(lines) + "\n"
 
@@ -327,7 +348,7 @@ def gate(args, out, err, env, today=None):
     except InputError as error:
         message = "Trivy image %s: %s" % (clean(reference), error)
         err.write("::error::%s\n" % clean(message, 600))
-        write_summary(summary, "### Trivy image: %s\n\n**Failed closed:** %s\n" % (clean(reference), clean(error, 600)))
+        write_summary(summary, "### Trivy image: %s\n\n**Failed closed:** %s\n" % (cell(reference), cell(error, 600)))
         return 2
     failing, excepted, stale, expired = verdict["failing"], verdict["excepted"], verdict["stale"], verdict["expired"]
     write_summary(summary, render_summary(reference, failing, secrets, excepted, stale, expired))

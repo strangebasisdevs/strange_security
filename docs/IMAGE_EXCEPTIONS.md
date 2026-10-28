@@ -157,7 +157,9 @@ missing digest, an unreadable path) fails every image job: it is never half
 applied. A missing file means no exceptions.
 
 An entry matches a finding only when the repository name, the `sha256` digest,
-the vulnerability id and the package name are all equal, and the Trivy report
+the vulnerability id and the package name are all equal (compared exactly as
+Trivy reports them: no trimming, no normalisation, so `a/b` never covers `a|b`
+and a trailing space or control character never matches), and the Trivy report
 confirms it scanned that digest (`Metadata.RepoDigests`). The repository name is
 the text of the `images` line without tag or digest, so `nextcloud` and
 `docker.io/library/nextcloud` are different. The same id and package in any

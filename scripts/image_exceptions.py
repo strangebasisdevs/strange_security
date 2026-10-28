@@ -239,7 +239,7 @@ def evaluate(entries, repository, digest, findings, today, unbound_reason="the i
     entries must have passed schema_errors. digest is the sha256 digest that was
     scanned, or None when it is not known: then no entry applies. An entry applies
     only when its image, digest, vulnerability id and package all equal the
-    finding's, and it has not expired. Returns a dict with
+    finding's raw Trivy strings (raw_id, raw_package), and it has not expired. Returns a dict with
       excepted  list of (finding, entry)
       failing   findings with no live entry
       expired   every expired entry of the file, for any image (each one fails)
@@ -251,7 +251,10 @@ def evaluate(entries, repository, digest, findings, today, unbound_reason="the i
     used: set = set()
     excepted, failing = [], []
     for finding in findings:
-        entry = bound.get((finding["id"], finding["package"]))
+        # The raw Trivy strings, not the cleaned display copies (clean() maps "a|b" to
+        # "a/b" and drops a trailing space or NUL). A finding without them (a test
+        # double) falls back to its id and package.
+        entry = bound.get((finding.get("raw_id", finding["id"]), finding.get("raw_package", finding["package"])))
         if entry is None:
             failing.append(finding)
         else:
@@ -314,18 +317,19 @@ def draft(scans, reviewer, reviewed, days):
         except ti.InputError as error:
             raise ExceptionsError(str(error))
         for finding in findings:
-            key = (repository, digest, finding["id"], finding["package"])
+            raw_id, raw_package = finding.get("raw_id", finding["id"]), finding.get("raw_package", finding["package"])
+            key = (repository, digest, raw_id, raw_package)
             if key in seen:
                 continue
             seen.add(key)
             entries.append({
-                "image": repository, "digest": digest, "id": finding["id"], "package": finding["package"],
+                "image": repository, "digest": digest, "id": raw_id, "package": raw_package,
                 "reason": "", "reviewer": reviewer or "",
                 "reviewed": "" if reviewed is None else reviewed.isoformat(), "expires": expires,
             })
             notes.append("%s %s %s %s -> fixed in %s" % (
                 repository, finding["id"], finding["package"], finding["installed"], finding["fixed"]))
-    order = sorted(range(len(entries)), key=lambda i: (entries[i]["image"], entries[i]["id"], entries[i]["package"]))
+    order = sorted(range(len(entries)), key=lambda i: (entries[i]["image"], entries[i]["id"], entries[i]["package"] or ""))
     return [entries[i] for i in order], [notes[i] for i in order]
 
 

@@ -338,12 +338,31 @@ class Gate(unittest.TestCase):
             code, *_ = self.run_gate(secret_report=report(result(secrets=bad)))
             self.assertEqual(code, 2)
 
-    def test_missing_reports_fail_closed(self):
+    def missing_report_run(self, vuln_present, secret_present):
+        vpath = self.write("vuln.json", report()) if vuln_present else os.path.join(self.dir, "nope.json")
+        spath = self.write("secret.json", report()) if secret_present else os.path.join(self.dir, "nope2.json")
+        summary = os.path.join(self.dir, "summary.md")
         out, err = io.StringIO(), io.StringIO()
-        argv = ["gate", "--reference", "app:1", "--vuln", os.path.join(self.dir, "nope.json"),
-                "--secret", os.path.join(self.dir, "nope2.json"), "--exceptions-file", "x.json"]
-        self.assertEqual(ti.main(argv, {}, out, err), 2)
-        self.assertIn("::error::", err.getvalue())
+        argv = ["gate", "--reference", "app:1", "--vuln", vpath, "--secret", spath,
+                "--exceptions-file", "x.json", "--summary", summary]
+        return ti.main(argv, {}, out, err), err.getvalue(), slurp(summary)
+
+    def test_a_missing_vulnerability_report_fails_closed(self):
+        code, err, summary = self.missing_report_run(vuln_present=False, secret_present=True)
+        self.assertEqual(code, 2)
+        self.assertIn("::error::", err)
+        self.assertIn("vulnerability report", err)
+        self.assertIn("Failed closed", summary)
+
+    def test_a_missing_secret_report_fails_closed(self):
+        code, err, summary = self.missing_report_run(vuln_present=True, secret_present=False)
+        self.assertEqual(code, 2)
+        self.assertIn("::error::", err)
+        self.assertIn("secret report", err)
+        self.assertIn("Failed closed", summary)
+
+    def test_both_reports_present_is_the_control_for_the_missing_report_tests(self):
+        self.assertEqual(self.missing_report_run(True, True)[0], 0)
 
     def exceptions_run(self, content=None, make_dir=False):
         os.makedirs(os.path.join(self.dir, ".github"), exist_ok=True)
@@ -382,6 +401,102 @@ class Gate(unittest.TestCase):
         for path in ("../x.json", "/etc/passwd", "a b"):
             self.assertEqual(self.run_gate(exceptions=path)[0], 2)
 
+    def test_summary_is_safe_for_markdown_and_workflow_commands(self):
+        nasty = vuln("CVE-9")
+        nasty["PkgName"] = "a|b`c\n::error::pwned"
+        code, out, err, summary = self.run_gate(report(result([nasty], target="t\n::set-output name=x::y")),
+                                                reference="app:1")
+        self.assertEqual(code, 1)
+        for text in (out, summary):
+            for line in text.splitlines():
+                self.assertFalse(line.lstrip().startswith("::"), line)
+        for line in err.splitlines():
+            self.assertTrue(line.startswith("::error::"), line)
+        row = [l for l in summary.splitlines() if "CVE-9" in l][0]
+        self.assertEqual(row.count("|"), 7)
+
+    HOSTILE = "|`::<img src=x onerror=y> [x](y) ![i](https://e.example/x.png) \\"
+
+    def assert_cell_is_inert(self, row, pipes):
+        self.assertEqual(row.count("|"), pipes, row)
+        for char in "`<>[]()!\\":
+            self.assertNotIn(char, row)
+        self.assertNotIn("::", row)
+        self.assertNotIn("://", row)
+
+    def test_untrusted_text_in_every_summary_cell_cannot_inject_markdown_or_html(self):
+        # An excepted row: the reason is free text from the caller's exceptions file.
+        reason = "ok" + self.HOSTILE + " end"
+        data = report(result([vuln()]), result([vuln("CVE-2026-0002")], target="t" + self.HOSTILE))
+        code, out, err, summary = self.excepted_run([self.entry(reason=reason)], data)
+        self.assertEqual(code, 1)
+        for line in summary.splitlines():
+            self.assertFalse(line.lstrip().startswith("::"), line)
+        excepted = [l for l in summary.splitlines() if "CVE-2026-0001" in l][0]
+        self.assert_cell_is_inert(excepted, 9)
+        self.assertIn("reviewer-one", excepted)
+        self.assertIn("ok", excepted)  # the text is shown, only its markup is neutralised
+        # A failing row with a hostile Target.
+        failing = [l for l in summary.splitlines() if "CVE-2026-0002" in l][0]
+        self.assert_cell_is_inert(failing, 7)
+        # The same through a package, an installed version and a fixed version.
+        hostile = vuln("CVE-2026-0003", PkgName="p" + self.HOSTILE, InstalledVersion="i" + self.HOSTILE,
+                       FixedVersion="f" + self.HOSTILE)
+        code, out, err, summary = self.run_gate(report(result([hostile], target="t")))
+        self.assertEqual(code, 1)
+        self.assert_cell_is_inert([l for l in summary.splitlines() if "CVE-2026-0003" in l][0], 7)
+
+    def test_hostile_secret_fields_are_inert_in_the_summary(self):
+        leaked = report(result(secrets=[secret(RuleID="r" + self.HOSTILE, Title="t" + self.HOSTILE)],
+                               target="f" + self.HOSTILE))
+        code, out, err, summary = self.run_gate(secret_report=leaked)
+        self.assertEqual(code, 1)
+        self.assert_cell_is_inert([l for l in summary.splitlines() if l.startswith("| CRITICAL")][0], 6)
+
+    def test_stale_and_expired_rows_are_inert_in_the_summary(self):
+        stale = self.entry(reason="ok" + self.HOSTILE + " end")
+        code, out, err, summary = self.excepted_run([stale, self.entry(id="CVE-2026-0005", expires="2026-10-31")],
+                                                    report())
+        self.assertEqual(code, 1)
+        self.assertIn("Stale exceptions", summary)
+        self.assertIn("Expired exceptions", summary)
+        for line in summary.splitlines():
+            self.assertFalse(line.lstrip().startswith("::"), line)
+            if line.startswith(("- ", "| example/app")):
+                self.assert_cell_is_inert(line, line.count("|"))
+
+    def test_long_lists_are_truncated_in_the_summary_only(self):
+        findings = [vuln("CVE-%d" % i) for i in range(ti.MAX_ROWS + 5)]
+        code, out, err, summary = self.run_gate(report(result(findings)))
+        self.assertEqual(code, 1)
+        self.assertIn("and 5 more", summary)
+        self.assertEqual(out.count("fixable "), ti.MAX_ROWS + 5)
+        self.assertIn("%d fixable" % (ti.MAX_ROWS + 5), err)
+
+    def test_summary_appends_for_several_images(self):
+        self.run_gate()
+        self.run_gate(report(result([vuln()])))
+        text = slurp(os.path.join(self.dir, "summary.md"))
+        self.assertIn("Passed", text)
+        self.assertIn("Failed", text)
+
+    def test_summary_comes_from_the_environment_when_not_given(self):
+        summary = os.path.join(self.dir, "env-summary.md")
+        vpath, spath = self.write("v.json", report()), self.write("s.json", report())
+        argv = ["gate", "--reference", "app:1", "--vuln", vpath, "--secret", spath, "--exceptions-file", "none.json"]
+        os.chdir(self.dir)
+        try:
+            self.assertEqual(ti.main(argv, {"GITHUB_STEP_SUMMARY": summary}, io.StringIO(), io.StringIO()), 0)
+        finally:
+            os.chdir(HERE)
+        self.assertTrue(os.path.exists(summary))
+
+    def test_bad_gate_arguments_fail(self):
+        base = ["gate", "--reference", "a", "--vuln", "v", "--secret", "s", "--exceptions-file", "e"]
+        for argv in (base[:-2], base + ["--bogus", "x"], base + ["--vuln", "again"], base[:-1]):
+            with self.subTest(argv=argv):
+                self.assertEqual(ti.main(argv, {}, io.StringIO(), io.StringIO()), 2)
+
     # ---- the exception engine inside the gate
 
     REF = "example/app:1.2.3@" + DIGEST
@@ -411,6 +526,30 @@ class Gate(unittest.TestCase):
         row = [l for l in summary.splitlines() if "CVE-2026-0001" in l][0]
         self.assertIn("| 2026-11-20 | reviewer-one |", row)
         self.assertIn("the vendor has not rebuilt the image", row)
+
+    def test_an_entry_matches_the_raw_trivy_strings_not_the_cleaned_display_copies(self):
+        # clean() turns "a|b" into "a/b" and drops a leading or trailing space and a NUL, so a
+        # match on the cleaned copy would except a finding the entry does not name.
+        # Each case: label, the entry's package, the finding's id and PkgName.
+        cases = (("package a/b vs a|b", "a/b", "CVE-2026-0001", "a|b"),
+                 ("package with a trailing NUL", "libfoo", "CVE-2026-0001", "libfoo\x00"),
+                 ("package with a trailing space", "libfoo", "CVE-2026-0001", "libfoo "),
+                 ("package with a leading space", "libfoo", "CVE-2026-0001", " libfoo"),
+                 ("id with a trailing NUL", "libfoo", "CVE-2026-0001\x00", "libfoo"),
+                 ("id with a trailing space", "libfoo", "CVE-2026-0001 ", "libfoo"),
+                 ("id with a leading space", "libfoo", " CVE-2026-0001", "libfoo"))
+        for label, entry_package, vid, package in cases:
+            with self.subTest(label):
+                code, out, err, summary = self.excepted_run(
+                    [self.entry(package=entry_package)], report(result([vuln(vid, PkgName=package)])))
+                self.assertEqual(code, 1)
+                self.assertNotIn("excepted ", out)
+                self.assertIn("fixable HIGH", out)
+                self.assertIn("::warning::Stale exception", out)
+        # The control: the same entry does except the finding that carries exactly its strings.
+        code, out, *_ = self.excepted_run([self.entry(package="a/b")], report(result([vuln(PkgName="a/b")])))
+        self.assertEqual(code, 0)
+        self.assertIn("excepted HIGH CVE-2026-0001 a/b", out)
 
     def test_an_entry_covers_only_its_own_id_and_package(self):
         findings = [vuln("CVE-2026-0001"), vuln("CVE-2026-0002"), vuln("CVE-2026-0001", PkgName="libbar")]
@@ -678,6 +817,21 @@ class Workflow(unittest.TestCase):
         gate_step = step(self.text, "Gate image")
         self.assertNotIn("if:", gate_step[:gate_step.index("run:")])
         self.assertNotIn("always()", gate_step)
+
+    def test_the_engine_exit_status_is_the_job_status(self):
+        # The run block of the Gate image step is the python3 -I gate call and nothing else: no
+        # operator that could swallow its exit status, and no continue-on-error on the step.
+        script = extract_run_block(os.path.join(WORKFLOWS, WORKFLOW), "Gate image")
+        self.assertEqual(script.rstrip("\n") + "\n", (
+            "python3 -I .strange-security/scripts/trivy_images.py gate \\\n"
+            '  --reference "$REFERENCE" \\\n'
+            '  --vuln "$RUNNER_TEMP/trivy-images/out/vuln.json" \\\n'
+            '  --secret "$RUNNER_TEMP/trivy-images/out/secret.json" \\\n'
+            '  --exceptions-file "$EXCEPTIONS_FILE"\n'))
+        for token in ("||", "&&", ";", "set +e", "|| true", "|", "&", "trap", "exit", "$?"):
+            self.assertNotIn(token, script)
+        lines = [l for l in step(self.text, "Gate image").splitlines() if not l.lstrip().startswith("#")]
+        self.assertNotIn("continue-on-error", "\n".join(lines))
 
     def test_the_scan_job_checks_the_engine_out_and_the_gate_is_what_reads_the_exceptions(self):
         self.assertIn("test -f .strange-security/scripts/image_exceptions.py", self.scan)
