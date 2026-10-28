@@ -379,7 +379,7 @@ rather than the gitleaks GitHub Action.
 `trivy.yml`, `semgrep.yml` and `gitleaks.yml` list what a failed check found,
 so the job page names the package, rule and location even with
 `upload-sarif: false` (no code scanning). After the scan, a `Report ... findings`
-step runs with `if: always()` (also when `upload-sarif` is `true`) and renders
+step (two in `trivy.yml`, one per scan, so each gets its own 10 annotations) runs with `if: always()` (also when `upload-sarif` is `true`) and renders
 the SARIF the scan already wrote, using `scripts/sarif_report.py` under
 `python3 -I`:
 
@@ -390,12 +390,15 @@ the SARIF the scan already wrote, using `scripts/sarif_report.py` under
 
 Shown per finding: tool, rule or vulnerability id, severity, file path, line;
 for vulnerabilities also package, installed version, fixed version and title;
-for Semgrep the rule's static description (truncated, escaped); for gitleaks
+for Semgrep the rule's static description (`fullDescription`, else `shortDescription`, else nothing; truncated, escaped); for gitleaks
 the short commit sha. **Never shown**: the matched secret text, Semgrep code
 snippets, SARIF `snippet` and `contextRegion` fields, fingerprints, and, for
-secret scanners (Trivy secrets, gitleaks), the result message. Secrets show
+secret scanners (Trivy secrets, gitleaks) and Semgrep (which puts matched code in
+it), the result message. Secrets show
 rule, file and line only. Untrusted text goes through the same escaping as the
-image summaries (`clean()` and `cell()` of `scripts/trivy_images.py`).
+image summaries (`clean()` and `cell()` of `scripts/trivy_images.py`). Paths are
+repo-relative: a leading `/src/` (Semgrep's container mount) and `file://` are
+stripped, and a path with a `..` component is not shown.
 
 The report is fail-safe and never decides the job: the scan step alone does
 (it is not `continue-on-error`). The script exits 0 whatever happens. A
@@ -456,7 +459,9 @@ pull request. They cover:
   fields must not leak), escaping of hostile paths and messages, row and
   annotation caps, missing and malformed input, an exit status of 0 in every
   case, and the wiring of the report steps (`if: always()`, `python3 -I`, no
-  `continue-on-error` on the scans);
+  `continue-on-error` on the scans, each run block executed under
+  `bash -eo pipefail` with a failing `python3` stub and no SARIF, exit 0, and
+  nothing in it but the `python3` command and its `|| echo` fallback);
 - that every `uses:` in `.github/workflows` is a full 40-hex SHA with a
   `# vX.Y.Z` comment (only the gate's local calls are exempt);
 - the structure of the workflow files in `tests/test_workflows.py` (checker

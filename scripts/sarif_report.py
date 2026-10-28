@@ -23,7 +23,8 @@ Never shown, by construction (only the fields below are read, nothing is copied
 wholesale): the matched secret text, source snippets, SARIF snippet and
 contextRegion fields, fingerprints, and for secret scanners (Trivy secrets,
 gitleaks) the result message. Read fields: rule id, level, location uri and
-start line, the rule's static description, and for Trivy vulnerabilities the
+start line, the rule's static description (fullDescription, else shortDescription;
+never the result message, which Semgrep fills with matched code), and for Trivy vulnerabilities the
 Package, Installed Version, Fixed Version and Severity lines of the message.
 For gitleaks also the commit sha (first 12 hex digits) of the finding.
 
@@ -150,8 +151,13 @@ def path_of(uri):
     text = urllib.parse.unquote(uri)
     if text.startswith("file://"):
         text = text[len("file://"):]
+    # Semgrep scans /src inside its container: report repo-relative paths.
+    if text.startswith("/src/"):
+        text = text[len("/src/"):]
     while text.startswith("./"):
         text = text[2:]
+    if ".." in re.split(r"[/\\]", text):
+        return ""
     return text
 
 
@@ -218,7 +224,8 @@ def findings_of(sarif, kind):
                     item[name] = match.group(1) if match else ""
                 item["message"] = _text(rule.get("shortDescription"))
             elif kind == "code":
-                item["message"] = _text(rule.get("fullDescription")) or message
+                # Never the result message: Semgrep interpolates matched code into it.
+                item["message"] = _text(rule.get("fullDescription")) or _text(rule.get("shortDescription"))
             else:
                 item["message"] = ""
                 commit = _dict(result.get("partialFingerprints")).get("commitSha")
@@ -283,7 +290,9 @@ def annotation(tool_name, kind, f):
     elif kind == "secret":
         text = "%s: secret detected by rule %s (value not shown)" % (f["severity"], f["rule"])
     else:
-        text = "%s %s: %s" % (f["severity"], f["rule"], f["message"])
+        text = "%s %s" % (f["severity"], f["rule"])
+        if f["message"]:
+            text += ": " + f["message"]
     props = []
     if f["file"]:
         props.append("file=" + prop(f["file"]))

@@ -10,9 +10,11 @@ import sys
 import tempfile
 import unittest
 
+from tests.test_trivy_image_validation import BASH, extract_run_block
 from tests.test_workflows import read, step
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
 SCRIPT = os.path.join(HERE, "..", "scripts", "sarif_report.py")
 
 spec = importlib.util.spec_from_file_location("sarif_report", SCRIPT)
@@ -119,11 +121,71 @@ class Rendering(unittest.TestCase):
                       "ERROR python.lang.eval: Detected eval of user input", out)
         self.assertNotIn(SECRET_TEXT, summary + out)
 
-    def test_semgrep_falls_back_to_the_result_message(self):
+    def test_semgrep_never_renders_the_result_message(self):
+        sentinel = "SENTINEL-MATCHED-CODE-" + SECRET_TEXT
+        cases = {
+            "neither": [{"id": "rule.x"}],
+            "short": [{"id": "rule.x", "shortDescription": {"text": "short static"}}],
+            "none": [],
+        }
+        for label, rules in cases.items():
+            r = Runner(self)
+            r.write(sarif([result("rule.x", sentinel, uri="a.py", line=1)], rules))
+            code, summary, out = r.run("semgrep")
+            self.assertEqual(code, 0)
+            self.assertNotIn("SENTINEL-MATCHED-CODE", summary + out, label)
+            self.assertNotIn(SECRET_TEXT, summary + out, label)
+            self.assertIn("rule.x", summary)
         r = Runner(self)
-        r.write(sarif([result("rule.x", "plain message", uri="a.py", line=1)]))
+        r.write(sarif([result("rule.x", sentinel, uri="a.py", line=1)], cases["short"]))
+        _, summary, out = r.run("semgrep")
+        self.assertIn("| ERROR | rule.x | a.py | 1 | short static |", summary)
+        r = Runner(self)
+        r.write(sarif([result("rule.x", sentinel, uri="a.py", line=1)], cases["neither"]))
+        _, summary, out = r.run("semgrep")
+        self.assertIn("| ERROR | rule.x | a.py | 1 |  |", summary)
+        self.assertIn("title=Semgrep rule.x::ERROR rule.x\n", out)
+
+    def test_full_description_wins_over_short(self):
+        r = Runner(self)
+        rules = [{"id": "rule.x", "fullDescription": {"text": "the full one"},
+                  "shortDescription": {"text": "the short one"}}]
+        r.write(sarif([result("rule.x", "msg", uri="a.py", line=1)], rules))
         _, summary, _ = r.run("semgrep")
-        self.assertIn("| ERROR | rule.x | a.py | 1 | plain message |", summary)
+        self.assertIn("the full one", summary)
+        self.assertNotIn("the short one", summary)
+
+    def test_paths_are_repo_relative(self):
+        cases = {
+            "/src/app/main.py": "app/main.py",
+            "file:///src/app/main.py": "app/main.py",
+            "file://src/app/main.py": "src/app/main.py",
+            "./app/main.py": "app/main.py",
+            "app/main.py": "app/main.py",
+            "/src/./x.py": "x.py",
+            "/src/a%20b.py": "a b.py",
+        }
+        for uri, expected in cases.items():
+            self.assertEqual(sr.path_of(uri), expected, uri)
+
+    def test_paths_with_dotdot_components_are_refused(self):
+        for uri in ("/src/../etc/passwd", "../x.py", "a/../b.py", "file:///src/a/../../b", "a\\..\\b",
+                    "/src/%2e%2e/x", "..", "/src/.."):
+            self.assertEqual(sr.path_of(uri), "", uri)
+        self.assertEqual(sr.path_of("/src/a..b/c...py"), "a..b/c...py")
+        r = Runner(self)
+        r.write(sarif([result("rule.x", "m", uri="/src/../etc/passwd", line=3)]))
+        _, summary, out = r.run("semgrep")
+        self.assertNotIn("passwd", summary + out)
+        self.assertNotIn("file=", out)
+
+    def test_src_prefix_is_stripped_in_summary_and_annotation(self):
+        r = Runner(self)
+        r.write(sarif([result("rule.x", "m", uri="file:///src/pkg/mod.py", line=9)]))
+        _, summary, out = r.run("semgrep")
+        self.assertIn("| pkg/mod.py | 9 |", summary)
+        self.assertIn("::error file=pkg/mod.py,line=9,", out)
+        self.assertNotIn("/src", summary + out)
 
     def test_gitleaks_shows_rule_file_line_and_commit_only(self):
         r = Runner(self)
@@ -415,11 +477,12 @@ class SharedEscaping(unittest.TestCase):
         self.assertLessEqual(imports, {b"importlib", b"json", b"os", b"re", b"sys", b"urllib"})
 
 
-REPORT_STEPS = {
-    "trivy.yml": ("Report Trivy findings", ["trivy-secret", "trivy-vuln"]),
-    "semgrep.yml": ("Report Semgrep findings", ["semgrep"]),
-    "gitleaks.yml": ("Report gitleaks findings", ["gitleaks"]),
-}
+REPORT_STEPS = [
+    ("trivy.yml", "Report Trivy secret findings", ["trivy-secret"]),
+    ("trivy.yml", "Report Trivy vulnerability findings", ["trivy-vuln"]),
+    ("semgrep.yml", "Report Semgrep findings", ["semgrep"]),
+    ("gitleaks.yml", "Report gitleaks findings", ["gitleaks"]),
+]
 SCAN_STEPS = {
     "trivy.yml": ["Run Trivy secret scan", "Run Trivy vulnerability scan"],
     "semgrep.yml": ["Run Semgrep"],
@@ -429,7 +492,7 @@ SCAN_STEPS = {
 
 class WorkflowWiring(unittest.TestCase):
     def test_report_step_runs_always_with_python_dash_i(self):
-        for name, (title, tools) in REPORT_STEPS.items():
+        for name, title, tools in REPORT_STEPS:
             text = read(name)
             block = step(text, title)
             self.assertRegex(block, r"(?m)^        if: always\(\)$", name)
@@ -440,13 +503,13 @@ class WorkflowWiring(unittest.TestCase):
             self.assertEqual(block.count("sarif_report.py"), len(tools), name)
 
     def test_report_step_cannot_fail_the_job(self):
-        for name, (title, tools) in REPORT_STEPS.items():
+        for name, title, tools in REPORT_STEPS:
             block = step(read(name), title)
             self.assertEqual(block.count("|| echo \"::warning::"), len(tools), name)
             self.assertNotRegex(block, r"(?m)^\s*exit\b", name)
 
     def test_report_step_comes_after_every_scan_step(self):
-        for name, (title, _) in REPORT_STEPS.items():
+        for name, title, _ in REPORT_STEPS:
             text = read(name)
             for scan in SCAN_STEPS[name]:
                 self.assertGreater(text.index("- name: " + title), text.index("- name: " + scan), (name, scan))
@@ -459,16 +522,15 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertNotIn("continue-on-error", step(text, scan), (name, scan))
 
     def test_report_does_not_depend_on_upload_sarif(self):
-        for name, (title, _) in REPORT_STEPS.items():
+        for name, title, _ in REPORT_STEPS:
             self.assertNotIn("upload-sarif", step(read(name), title), name)
 
     def test_report_reads_the_files_the_scans_write(self):
         trivy = read("trivy.yml")
         self.assertIn("--output /src/trivy-secret.sarif", step(trivy, "Run Trivy secret scan"))
         self.assertIn("--output /src/trivy-vuln.sarif", step(trivy, "Run Trivy vulnerability scan"))
-        report = step(trivy, "Report Trivy findings")
-        self.assertIn("--sarif trivy-secret.sarif", report)
-        self.assertIn("--sarif trivy-vuln.sarif", report)
+        self.assertIn("--sarif trivy-secret.sarif", step(trivy, "Report Trivy secret findings"))
+        self.assertIn("--sarif trivy-vuln.sarif", step(trivy, "Report Trivy vulnerability findings"))
         self.assertIn('--sarif "$RUNNER_TEMP/semgrep/semgrep.sarif"', step(read("semgrep.yml"), "Report Semgrep findings"))
         gitleaks = read("gitleaks.yml")
         self.assertIn("--report-path gitleaks.sarif", step(gitleaks, "Run gitleaks history scan"))
@@ -492,6 +554,48 @@ class WorkflowWiring(unittest.TestCase):
         scan = scan[:scan.index("\n\n")]
         self.assertIn("--redact", scan)
         self.assertNotRegex(scan, r"--verbose|\s-v\b")
+
+
+@unittest.skipUnless(BASH, "bash is required")
+class ReportStepsRunUnderBash(unittest.TestCase):
+    """The real run blocks, under bash -eo pipefail, with python3 failing and no SARIF."""
+
+    def block(self, name, title):
+        return extract_run_block(os.path.join(ROOT, ".github", "workflows", name), title)
+
+    def test_a_failing_python3_never_fails_the_step(self):
+        for name, title, tools in REPORT_STEPS:
+            with self.subTest(step=title):
+                script = self.block(name, title)
+                with tempfile.TemporaryDirectory() as tmp:
+                    bindir = os.path.join(tmp, "bin")
+                    work = os.path.join(tmp, "work")
+                    os.makedirs(bindir)
+                    os.makedirs(work)
+                    stub = os.path.join(bindir, "python3")
+                    with open(stub, "w", encoding="utf-8", newline="\n") as handle:
+                        handle.write("#!/bin/sh\nexit 7\n")
+                    os.chmod(stub, 0o755)
+                    env = dict(os.environ, RUNNER_TEMP=tmp)
+                    env["PATH"] = bindir + os.pathsep + env["PATH"]
+                    done = subprocess.run([BASH, "-eo", "pipefail", "-c", script], cwd=work, env=env,
+                                          capture_output=True, text=True)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertEqual(done.stdout.count("::warning::"), len(tools), done.stdout)
+
+    def test_run_blocks_hold_only_the_report_command_and_its_fallback(self):
+        for name, title, tools in REPORT_STEPS:
+            with self.subTest(step=title):
+                script = self.block(name, title)
+                joined = re.sub(r"[ \t]*\\\n\s*", " ", script).strip()
+                pattern = (r"python3 -I \.strange-security/scripts/sarif_report\.py --tool (\S+) --sarif (\S+)"
+                           r" \|\| echo \"::warning::[A-Za-z ]+\"")
+                commands = joined.split("\n")
+                self.assertEqual(len(commands), len(tools), joined)
+                for command, tool in zip(commands, tools):
+                    found = re.fullmatch(pattern, command)
+                    self.assertIsNotNone(found, command)
+                    self.assertEqual(found.group(1), tool)
 
 
 if __name__ == "__main__":

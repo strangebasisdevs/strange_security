@@ -122,11 +122,18 @@ jobs:
       # no secret text, only rule, file and line for secrets. Always, so it runs
       # after a failed scan; it exits 0 whatever happens, so it never changes the
       # job result (only the scan steps decide). python3 -I, from the shared checkout.
-      - name: Report Trivy findings
+      #
+      # One report step per scan: GitHub shows 10 error annotations per step, so
+      # each scan gets its own 10.
+      - name: Report Trivy secret findings
         if: always()
         run: |
           python3 -I .strange-security/scripts/sarif_report.py --tool trivy-secret --sarif trivy-secret.sarif \
             || echo "::warning::The Trivy secret findings report could not run"
+
+      - name: Report Trivy vulnerability findings
+        if: always()
+        run: |
           python3 -I .strange-security/scripts/sarif_report.py --tool trivy-vuln --sarif trivy-vuln.sarif \
             || echo "::warning::The Trivy vulnerability findings report could not run"
 
