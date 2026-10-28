@@ -382,6 +382,51 @@ class Summary(GateBase):
         self.assertEqual(code, 1)
         self.assert_inert([line for line in summary.splitlines() if line.startswith("| CRITICAL")][0], 6)
 
+    def test_www_autolinks_are_broken_in_every_untrusted_summary_cell(self):
+        e = entry(target="t.php", reason="see WWW.example.com now", evidence="https://www.example.com/x")
+        data = sreport([leak()], target="t.php")
+        code, out, err, summary = self.run_gate(secret_report=data, entries=[e])
+        self.assertEqual(code, 0)
+        row = [line for line in summary.splitlines() if line.startswith("| " + RULE)][0]
+        self.assertIn("WWW", row)  # shown, only the link form is broken
+        self.assertIn("example", row)
+        self.assertNotRegex(summary, r"(?i)www\.")
+        # A hostile Target in a failing row and in a stale entry.
+        code, out, err, summary = self.run_gate(secret_report=sreport([leak()], target="www.evil.example/x"),
+                                                entries=[entry(target="Www.evil.example/y")])
+        self.assertEqual(code, 1)
+        self.assertIn("evil", summary)
+        self.assertNotRegex(summary, r"(?i)www\.")
+
+    LOG_HOSTILE = "|`::##[x]"
+    TARGET_HOSTILE = "|`::##x"  # a target may not hold [ ] * ?
+
+    def assert_log_line_inert(self, text, prefix):
+        lines = [line for line in text.splitlines() if line.startswith(prefix)]
+        self.assertEqual(len(lines), 1, text)
+        body = lines[0][len(prefix):]
+        for token in ("|", "`", "::", "##["):
+            self.assertNotIn(token, body, lines[0])
+        self.assertIn("x", body)  # the text is kept, only its markup is neutralised
+
+    def test_hostile_entry_text_is_inert_in_the_allowlisted_log_line(self):
+        e = entry(evidence="https://e.example/a" + self.LOG_HOSTILE)
+        code, out, err, _ = self.run_gate([leak()], entries=[e])
+        self.assertEqual((code, err), (0, ""))
+        self.assert_log_line_inert(out, "allowlisted known-public ")
+
+    def test_hostile_entry_text_is_inert_in_the_stale_warning(self):
+        e = entry(target="t" + self.TARGET_HOSTILE, start_line=7)
+        code, out, err, _ = self.run_gate([], entries=[e])
+        self.assertEqual((code, err), (0, ""))
+        self.assert_log_line_inert(out, "::warning::")
+
+    def test_hostile_entry_text_is_inert_in_the_expired_error(self):
+        e = entry(target="t" + self.TARGET_HOSTILE, expires="2026-10-31")
+        code, out, err, _ = self.run_gate([], entries=[e])
+        self.assertEqual(code, 1)
+        self.assert_log_line_inert(err, "::error::Secret allowlist entry expired")
+
     def test_long_lists_are_truncated_in_the_summary_only(self):
         n = ti.MAX_ROWS + 3
         entries = [entry(start_line=i + 1) for i in range(n)]
