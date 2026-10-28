@@ -122,12 +122,12 @@ MAX_FILE_BYTES = 4096
 def file_prop(path):
     """The file= property value for a repo-relative path from path_of(): the full literal
     path (no trimming, no length cap), escaped as a workflow command property (% : , CR
-    and LF), or None when it is longer than MAX_FILE_BYTES or holds ##[, another control or a
-    Unicode format character, so the annotation is written without file=."""
+    and LF), or None when it is longer than MAX_FILE_BYTES or holds ##[, another control, a
+    Unicode format character or a lone surrogate, so the annotation is written without file=."""
     if not isinstance(path, str) or not path or len(path.encode("utf-8", "replace")) > MAX_FILE_BYTES:
         return None
     text = path.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    if "##[" in text or _UNSAFE_PROPERTY.search(text) or any(unicodedata.category(c) == "Cf" for c in text):
+    if "##[" in text or _UNSAFE_PROPERTY.search(text) or any(unicodedata.category(c) in ("Cf", "Cs") for c in text):
         return None
     return text.replace(":", "%3A").replace(",", "%2C")
 
@@ -201,7 +201,7 @@ def path_of(uri, decode=False):
     by the caller from the trusted --tool argument, never from the SARIF: Trivy
     serialises the location through Go's url.Parse(...).String() (pkg/report/sarif.go),
     so "dir/a b.env" arrives as "dir/a%20b.env". The URI is decoded exactly once and
-    the result is checked again (no control or Unicode format character, no absolute path, no "..")."""
+    the result is checked again (no control, Unicode format character or lone surrogate, no absolute path, no "..")."""
     if not isinstance(uri, str):
         return ""
     # Without decode only a real URI (file:// scheme) is percent-encoded. gitleaks
@@ -217,7 +217,10 @@ def path_of(uri, decode=False):
             return ""
     # An invisible format character (bidi control, zero width) can make a name look
     # like another: refused for every producer, like a control character.
-    if any(unicodedata.category(ch) == "Cf" for ch in text):
+    # A lone surrogate (Cs) is refused the same way: it cannot be written as UTF-8.
+    # Percent-decoding cannot produce one (invalid UTF-8 such as %ED%A0%80 becomes
+    # U+FFFD), so this matters for literal paths and the decoded text alike.
+    if any(unicodedata.category(ch) in ("Cf", "Cs") for ch in text):
         return ""
     # Semgrep scans /src inside its container: report repo-relative paths.
     if text.startswith("/src/"):

@@ -66,10 +66,13 @@ class InputError(Exception):
 
 def escape_format(text):
     """text with every Unicode format character (category Cf: bidi controls such
-    as U+202E, zero-width characters, U+FEFF) written as a visible backslash-u escape,
-    so nothing invisible can reorder or disguise what a reader sees."""
+    as U+202E, zero-width characters, U+FEFF) and every lone surrogate (category Cs, which
+    cannot be encoded as UTF-8 and would make a write raise) written as a visible
+    backslash-u escape, so nothing invisible can reorder or disguise what a reader sees
+    and no field can break an output write. A valid astral character (emoji, CJK
+    extension B) is one Python character outside the surrogate range and is unchanged."""
     return "".join(("\\u%04x" % ord(c) if ord(c) <= 0xFFFF else "\\U%08x" % ord(c))
-                   if unicodedata.category(c) == "Cf" else c for c in text)
+                   if unicodedata.category(c) in ("Cf", "Cs") else c for c in text)
 
 
 def clean(value, limit=200):

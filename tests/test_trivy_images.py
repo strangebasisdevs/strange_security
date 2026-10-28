@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 
 from tests.test_inputs import input_block
@@ -466,6 +467,22 @@ class Gate(unittest.TestCase):
         self.assertEqual(ti.cell("a‮b&"), "a&#92;u202eb&amp;")
         # plain-text log output is not escaped
         self.assertEqual(ti.clean("a&b"), "a&b")
+
+    def test_lone_surrogates_are_escaped_and_astral_characters_kept(self):
+        self.assertEqual(ti.clean("a\ud800b\udfffc"), r"a\ud800b\udfffc")
+        self.assertEqual(ti.cell("a\ud800b"), "a&#92;ud800b")
+        self.assertEqual(ti.clean("a\U0001F600\U00020000"), "a\U0001F600\U00020000")
+        self.assertEqual(ti.cell("a\U0001F600\U00020000"), "a\U0001F600\U00020000")
+
+    def test_image_summary_renders_a_lone_surrogate_in_a_package_name(self):
+        hostile = vuln("CVE-2026-0005", PkgName="p\ud800\U0001F600", InstalledVersion="i\udfff",
+                       FixedVersion="f\ud800")
+        code, out, err, summary = self.run_gate(report(result([hostile], target="t\ud800")))
+        self.assertEqual(code, 1)
+        row = [l for l in summary.splitlines() if "CVE-2026-0005" in l][0]
+        self.assertIn("p&#92;ud800\U0001F600", row)
+        for text in (out, err, summary):
+            self.assertFalse([c for c in text if unicodedata.category(c) == "Cs"])
 
     def test_image_summary_neutralises_source_ampersands(self):
         entity = "x&#x202e;y&rlm;&ZeroWidthSpace;&#46;"

@@ -256,6 +256,72 @@ class Rendering(unittest.TestCase):
         self.assertEqual(sr.prop(bad), shown)
         self.assertEqual(sr.data(bad), shown)
 
+    def test_lone_surrogates_in_a_path_are_refused_for_every_tool(self):
+        for bad in ("\ud800", "\udfff"):
+            for uri in ("a%sb.py" % bad, bad, "/src/a%s" % bad, "file:///src/a%s" % bad):
+                self.assertEqual(sr.path_of(uri), "", ascii(uri))
+                self.assertEqual(sr.path_of(uri, True), "", ascii(uri))
+            self.assertIsNone(sr.file_prop("a%sb" % bad))
+            for tool in sr.TOOLS:
+                r = Runner(self)
+                r.write(sarif([result("rule.x", vuln_message(), uri="a%sb.py" % bad, line=2),
+                               result("rule.y", "m", line=3)]))
+                code, summary, out = r.run(tool)
+                self.assertEqual(code, 0)
+                self.assertIn("2 finding(s)", summary, tool)
+                self.assertIn("title=%s rule.x::" % sr.TOOLS[tool][1], out, tool)
+                self.assertNotIn("file=a", out, tool)
+                self.assertNotIn("report failed", out, tool)
+
+    def test_percent_decoding_cannot_produce_a_lone_surrogate(self):
+        # unquote() decodes with errors="replace": a CESU-8 style encoded surrogate becomes U+FFFD.
+        for uri in ("a%ED%A0%80b", "a%ED%BF%BFb", "%ED%A0%80"):
+            text = sr.urllib.parse.unquote(uri)
+            self.assertFalse([c for c in text if unicodedata.category(c) == "Cs"], uri)
+
+    def test_lone_surrogates_in_other_text_render_escaped(self):
+        for bad, shown in (("\ud800", r"\ud800"), ("\udfff", r"\udfff")):
+            self.assertEqual(sr.prop("x" + bad + "y"), "x" + shown + "y")
+            self.assertEqual(sr.data("x" + bad + "y"), "x" + shown + "y")
+            self.assertEqual(sr.cell("x" + bad + "y"), "x&#92;" + shown[1:] + "y")
+            rules = [{"id": "r" + bad, "shortDescription": {"text": "t" + bad}, "fullDescription": {"text": "f" + bad}}]
+            for tool in sr.TOOLS:
+                r = Runner(self)
+                r.write(sarif([result("r" + bad, vuln_message(package="p" + bad, installed="i" + bad,
+                                                              fixed="v" + bad), uri="ok.py", line=1)], rules))
+                code, summary, out = r.run(tool)
+                self.assertEqual(code, 0)
+                self.assertNotIn("report failed", out, tool)
+                self.assertFalse([c for c in summary + out if unicodedata.category(c) == "Cs"], tool)
+                self.assertIn("r&#92;" + shown[1:], summary, tool)
+                self.assertIn("r" + shown, out, tool)
+
+    def test_a_lone_surrogate_in_the_sarif_still_gives_a_full_report(self):
+        for tool in sr.TOOLS:
+            r = Runner(self)
+            r.write(sarif([result("rule.x", vuln_message(package="p\ud800"), uri="a\ud800.py", line=2),
+                           result("rule.y", "m\udfff", uri="b.py", line=3)]))
+            code, summary, out = r.run(tool)
+            self.assertEqual(code, 0)
+            self.assertNotIn("report failed", out, tool)
+            self.assertNotIn("Findings report::", out, tool)
+            self.assertIn("2 finding(s)", summary, tool)
+            self.assertIn("rule.x", summary, tool)
+            self.assertIn("rule.y", summary, tool)
+            self.assertIn("file=b.py", out, tool)
+
+    def test_valid_astral_characters_are_unchanged(self):
+        for text in ("a\U0001F600b", "\U00020000"):
+            self.assertEqual(sr.prop(text), text)
+            self.assertEqual(sr.data(text), text)
+            self.assertEqual(sr.path_of(text), text)
+            self.assertEqual(sr.file_prop(text), text)
+        r = Runner(self)
+        r.write(sarif([result("rule.x", vuln_message(package="p\U0001F600\U00020000"), uri="d\U00020000.py")]))
+        _, summary, out = r.run("trivy-vuln")
+        self.assertIn("p\U0001F600\U00020000", summary)
+        self.assertIn("file=d\U00020000.py", out)
+
     def test_the_producer_comes_only_from_the_tool_argument(self):
         # A Semgrep or gitleaks SARIF that names itself Trivy is not percent-decoded.
         for tool in ("semgrep", "gitleaks"):
