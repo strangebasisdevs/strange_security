@@ -131,7 +131,7 @@ class Workflows(unittest.TestCase):
         check = text.index("name: Check Semgrep suppressions")
         self.assertGreater(check, text.index("name: Run Semgrep"))
         self.assertGreater(check, text.index("name: Upload SARIF results"))
-        self.assertIn("if: always()", text[check:text.index("run:", check)])
+        self.assertIn("if: always() && steps.shared_verified.outcome == 'success'", text[check:text.index("run:", check)])
         upload = text.index("name: Upload SARIF results")
         self.assertIn("if: ${{ always() && inputs.upload-sarif }}", text[upload:text.index("uses:", upload)])
 

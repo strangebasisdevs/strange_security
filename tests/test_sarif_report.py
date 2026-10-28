@@ -865,9 +865,38 @@ SCAN_STEPS = {
 }
 
 
-# gitleaks fetches the report script only for the report, so its report also needs
-# the verified shared checkout; trivy.yml and semgrep.yml need that checkout for the scan.
-REPORT_IF = {"gitleaks.yml": "always() && steps.shared_verified.outcome == 'success'"}
+# Every step that runs a script from the shared checkout under always()/!cancelled()/
+# failure() must also require the verification step of its job to have succeeded in
+# this run: python3 -I does not authenticate the script, the verified checkout does.
+VERIFIED = "steps.shared_verified.outcome == 'success'"
+REPORT_IF = {name: "always() && " + VERIFIED for name in ("trivy.yml", "semgrep.yml", "gitleaks.yml")}
+# Workflows whose Verify shared workflow checkout step must carry id shared_verified,
+# with the scripts the later steps run checked there.
+VERIFY_FILES = {
+    "trivy.yml": ["scripts/sarif_report.py"],
+    "semgrep.yml": ["scripts/sarif_report.py", "scripts/check_suppressions.py"],
+    "gitleaks.yml": ["scripts/sarif_report.py"],
+}
+RUNS_SHARED_SCRIPT = re.compile(r"\.strange-security/scripts/")
+ALWAYS_LIKE = re.compile(r"always\(\)|failure\(\)|cancelled\(\)")
+
+
+def workflow_steps(text):
+    """Each step of a workflow as its own text, split at the step name lines."""
+    return re.split(r"(?m)^(?=      - name:)", text)[1:]
+
+
+def unguarded_shared_script_steps(text):
+    """Names of steps that run a shared-checkout script under always()/failure()/
+    !cancelled() without requiring the verified checkout."""
+    bad = []
+    for block in workflow_steps(text):
+        if not RUNS_SHARED_SCRIPT.search(block):
+            continue
+        condition = re.search(r"(?m)^        if:(.*)$", block)
+        if condition and ALWAYS_LIKE.search(condition.group(1)) and VERIFIED not in condition.group(1):
+            bad.append(re.match(r"      - name: (.*)", block).group(1))
+    return bad
 # gitleaks.yml steps that are allowed (and required) to be non-gating.
 GITLEAKS_SETUP = ["Resolve shared workflow source", "Checkout shared workflow repository",
                   "Verify shared workflow checkout"]
@@ -969,6 +998,65 @@ class WorkflowWiring(unittest.TestCase):
         block = step(read("gitleaks.yml"), "Report gitleaks findings")
         self.assertIn("if: always() && steps.shared_verified.outcome == 'success'", block)
         self.assertNotIn("continue-on-error", block)
+
+    def test_every_always_step_running_shared_scripts_requires_the_verified_checkout(self):
+        for name in sorted(os.listdir(os.path.join(ROOT, ".github", "workflows"))):
+            if name.endswith(".yml"):
+                self.assertEqual(unguarded_shared_script_steps(read(name)), [], name)
+
+    def test_checker_step_in_semgrep_requires_the_verified_checkout(self):
+        block = step(read("semgrep.yml"), "Check Semgrep suppressions")
+        self.assertRegex(block, r"(?m)^        if: always\(\) && %s$" % re.escape(VERIFIED))
+        self.assertNotIn("continue-on-error", block)
+
+    def test_removing_a_guard_is_detected(self):
+        for name, title, _ in REPORT_STEPS:
+            text = read(name)
+            self.assertEqual(unguarded_shared_script_steps(text), [], name)
+            guarded = "        if: always() && " + VERIFIED + "\n"
+            block = step(text, title)
+            self.assertIn(guarded, block)
+            for weaker in ("        if: always()\n", "        if: ${{ always() }}\n",
+                           "        if: ${{ !cancelled() }}\n", "        if: failure()\n"):
+                mutated = text.replace(block, block.replace(guarded, weaker))
+                self.assertNotEqual(mutated, text)
+                self.assertEqual(unguarded_shared_script_steps(mutated), [title], (name, weaker))
+            # Dropping the verification step's id leaves a guard that is never true.
+            mutated = text.replace("        id: shared_verified\n", "")
+            self.assertNotEqual(mutated, text)
+            self.assertRegex(step(read(name), "Verify shared workflow checkout"), r"(?m)^        id: shared_verified$")
+            self.assertNotRegex(step(mutated, "Verify shared workflow checkout"), r"(?m)^        id: shared_verified$")
+        semgrep = read("semgrep.yml")
+        block = step(semgrep, "Check Semgrep suppressions")
+        mutated = semgrep.replace(block, block.replace("always() && " + VERIFIED, "always()"))
+        self.assertEqual(unguarded_shared_script_steps(mutated), ["Check Semgrep suppressions"])
+
+    def test_verify_step_has_the_id_and_checks_the_scripts_it_guards(self):
+        for name, scripts in VERIFY_FILES.items():
+            text = read(name)
+            block = step(text, "Verify shared workflow checkout")
+            self.assertRegex(block, r"(?m)^        id: shared_verified$", name)
+            self.assertIn("git -C .strange-security rev-parse HEAD", block, name)
+            for script in scripts:
+                self.assertIn("-f .strange-security/" + script, block, (name, script))
+            # The id exists once, on that step only, and the guards refer to it.
+            self.assertEqual(text.count("id: shared_verified"), 1, name)
+            for other in workflow_steps(text):
+                if re.search(r"(?m)^        if:.*steps\.shared_verified", other):
+                    self.assertGreater(text.index(other), text.index(block), name)
+
+    def test_trivy_and_semgrep_setup_stays_gating(self):
+        # The scanner image is built from the shared checkout, so unlike gitleaks a
+        # failed resolve, checkout or verify must fail the job, never skip the scan quietly.
+        for name in ("trivy.yml", "semgrep.yml"):
+            text = read(name)
+            for title in GITLEAKS_SETUP:
+                block = step(text, title)
+                self.assertNotIn("continue-on-error", block, (name, title))
+                self.assertNotRegex(block, r"(?m)^        if:", (name, title))
+            build = step(text, "Build Trivy image" if name == "trivy.yml" else "Build Semgrep image")
+            self.assertNotRegex(build, r"(?m)^        if:", name)
+            self.assertLess(text.index("- name: Verify shared workflow checkout"), text.index("- name: Build "), name)
 
     def test_gitleaks_still_redacts(self):
         scan = step(read("gitleaks.yml"), "Run gitleaks history scan")

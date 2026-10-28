@@ -77,12 +77,19 @@ jobs:
           path: .strange-security
           persist-credentials: false
 
+      # The report steps below run under always(), so after a failed
+      # scan too. They run code from this checkout only if this step succeeded in
+      # this run (steps.shared_verified.outcome == 'success'): the checkout is the
+      # exact commit this workflow file came from and holds the scripts. Resolving,
+      # checking out or verifying stays gating: if it fails the job fails.
       - name: Verify shared workflow checkout
+        id: shared_verified
         env:
           WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
         run: |
           test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
           test -d .strange-security/scanner-images
+          test -f .strange-security/scripts/sarif_report.py
 
       # Image version lives in scanner-images/trivy.Dockerfile, the single spot Dependabot updates.
       - name: Build Trivy image
@@ -121,18 +128,19 @@ jobs:
       # SARIF files the scans wrote, whether or not they are uploaded. Redacted:
       # no secret text, only rule, file and line for secrets. Always, so it runs
       # after a failed scan; it exits 0 whatever happens, so it never changes the
-      # job result (only the scan steps decide). python3 -I, from the shared checkout.
+      # job result (only the scan steps decide). python3 -I, from the shared checkout,
+      # and only once that checkout was verified (see Verify shared workflow checkout).
       #
       # One report step per scan: GitHub shows 10 error annotations per step, so
       # each scan gets its own 10.
       - name: Report Trivy secret findings
-        if: always()
+        if: always() && steps.shared_verified.outcome == 'success'
         run: |
           python3 -I .strange-security/scripts/sarif_report.py --tool trivy-secret --sarif trivy-secret.sarif \
             || echo "::warning::The Trivy secret findings report could not run"
 
       - name: Report Trivy vulnerability findings
-        if: always()
+        if: always() && steps.shared_verified.outcome == 'success'
         run: |
           python3 -I .strange-security/scripts/sarif_report.py --tool trivy-vuln --sarif trivy-vuln.sarif \
             || echo "::warning::The Trivy vulnerability findings report could not run"

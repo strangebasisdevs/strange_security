@@ -499,7 +499,7 @@ rather than the gitleaks GitHub Action.
 `trivy.yml`, `semgrep.yml` and `gitleaks.yml` list what a failed check found,
 so the job page names the package, rule and location even with
 `upload-sarif: false` (no code scanning). After the scan, a `Report ... findings`
-step (two in `trivy.yml`, one per scan, so each gets its own 10 annotations) runs with `if: always()` (also when `upload-sarif` is `true`) and renders
+step (two in `trivy.yml`, one per scan, so each gets its own 10 annotations) runs with `if: always() && steps.shared_verified.outcome == 'success'` (so after a failed scan, also when `upload-sarif` is `true`, but only once the shared checkout was verified in that run) and renders
 the SARIF the scan already wrote, using `scripts/sarif_report.py` under
 `python3 -I`:
 
@@ -591,7 +591,9 @@ pull request. They cover:
   scanner, redaction (snippet, `contextRegion`, match, fingerprint and message
   fields must not leak), escaping of hostile paths and messages, row and
   annotation caps, missing and malformed input, an exit status of 0 in every
-  case, and the wiring of the report steps (`if: always()`, `python3 -I`, no
+  case, and the wiring of the report steps (`if: always() && steps.shared_verified.outcome == 'success'`,
+  and the same guard on every other `always()` step that runs a shared script, with
+  mutation checks that removing it is caught; `python3 -I`, no
   `continue-on-error` on the scans, each run block executed under
   `bash -eo pipefail` with a failing `python3` stub and no SARIF, exit 0, and
   nothing in it but the `python3` command and its `|| echo` fallback);

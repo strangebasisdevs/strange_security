@@ -77,12 +77,20 @@ jobs:
           path: .strange-security
           persist-credentials: false
 
+      # The report and checker steps below run under always(), so after a failed
+      # scan too. They run code from this checkout only if this step succeeded in
+      # this run (steps.shared_verified.outcome == 'success'): the checkout is the
+      # exact commit this workflow file came from and holds the scripts. Resolving,
+      # checking out or verifying stays gating: if it fails the job fails.
       - name: Verify shared workflow checkout
+        id: shared_verified
         env:
           WORKFLOW_SHA: ${{ steps.shared.outputs.sha }}
         run: |
           test "$(git -C .strange-security rev-parse HEAD)" = "$WORKFLOW_SHA"
           test -d .strange-security/scanner-images
+          test -f .strange-security/scripts/sarif_report.py
+          test -f .strange-security/scripts/check_suppressions.py
 
       # Image version lives in scanner-images/semgrep.Dockerfile, the single spot Dependabot updates.
       - name: Build Semgrep image
@@ -121,7 +129,7 @@ jobs:
       # runs after a failed scan; it exits 0 whatever happens, so it never
       # changes the job result (only the scan decides).
       - name: Report Semgrep findings
-        if: always()
+        if: always() && steps.shared_verified.outcome == 'success'
         run: |
           python3 -I .strange-security/scripts/sarif_report.py --tool semgrep \
             --sarif "$RUNNER_TEMP/semgrep/semgrep.sarif" \
@@ -131,7 +139,9 @@ jobs:
       # shared checkout with -I so the caller cannot influence the interpreter.
       # The shared checkout itself is not scanned. Last, with always(), so a
       # failing check cannot skip the scan or the upload, and a failing scan
-      # or upload cannot skip the check; any one failing fails the job.
+      # or upload cannot skip the check; any one failing fails the job. Only from
+      # a verified shared checkout: if that failed the job has already failed, and
+      # the check is skipped rather than run from an unauthenticated script.
       - name: Check Semgrep suppressions
-        if: always()
+        if: always() && steps.shared_verified.outcome == 'success'
         run: python3 -I .strange-security/scripts/check_suppressions.py .
