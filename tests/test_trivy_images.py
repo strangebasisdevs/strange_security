@@ -527,6 +527,12 @@ class Gate(unittest.TestCase):
         self.assertIn("| 2026-11-20 | reviewer-one |", row)
         self.assertIn("the vendor has not rebuilt the image", row)
 
+    def test_a_digit_free_ghsa_entry_excepts_the_finding_in_the_gate(self):
+        ghsa = "GHSA-cfgh-jmpq-rvwx"
+        code, out, err, summary = self.excepted_run([self.entry(id=ghsa)], report(result([vuln(ghsa)])))
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("excepted HIGH %s libfoo until 2026-11-20" % ghsa, out)
+
     def test_an_entry_matches_the_raw_trivy_strings_not_the_cleaned_display_copies(self):
         # clean() turns "a|b" into "a/b" and drops a leading or trailing space and a NUL, so a
         # match on the cleaned copy would except a finding the entry does not name.

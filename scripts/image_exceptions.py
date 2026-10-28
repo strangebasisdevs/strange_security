@@ -53,9 +53,12 @@ _COMPONENT = r"[a-z0-9]+(?:[._-]+[a-z0-9]+)*"
 WILDCARD = re.compile(r"[*?\[\]{}]")
 IMAGE = re.compile(r"%s(?::[0-9]{1,5})?(?:/%s)*" % (_COMPONENT, _COMPONENT), re.ASCII)
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
-# CVE-2026-0001, GHSA-xxxx-xxxx-xxxx, GO-2026-0001, RUSTSEC-2026-0001: starts with
-# a capital letter and holds a digit. Trivy secret rule ids are lowercase words.
-VULN_ID = re.compile(r"[A-Z][A-Za-z0-9]*-[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*", re.ASCII)
+# CVE-2026-0001, GO-2026-0001, RUSTSEC-2026-0001: starts with a capital letter and
+# holds a digit. A GHSA id (GHSA-xxxx-xxxx-xxxx, three lowercase groups drawn from
+# GitHub's alphabet 23456789cfghjmpqrvwx) may hold no digit at all, so it has its own
+# exact form. Trivy secret rule ids are lowercase words and match neither.
+VULN_ID = re.compile(r"GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}"
+                     r"|[A-Z][A-Za-z0-9]*-[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]*", re.ASCII)
 PACKAGE = re.compile(r"[A-Za-z0-9@][A-Za-z0-9._+:@/~-]*", re.ASCII)
 REVIEWER = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._@+-]*", re.ASCII)
 REASON = re.compile(r"[^\x00-\x1f\x7f-\x9f\u2028\u2029]+")

@@ -108,6 +108,15 @@ class Schema(unittest.TestCase):
             "id with spaces": entry(id="CVE-2026-0001 x"),
             "id with newline": entry(id="CVE-2026-0001\n"),
             "id without digit": entry(id="CVE-ABC"),
+            "ghsa wrong group length": entry(id="GHSA-cfgh-jmpq-rvw"),
+            "ghsa long group": entry(id="GHSA-cfgh-jmpq-rvwxx"),
+            "ghsa extra group": entry(id="GHSA-cfgh-jmpq-rvwx-cfgh"),
+            "ghsa missing group": entry(id="GHSA-cfgh-jmpq"),
+            "ghsa uppercase groups": entry(id="GHSA-CFGH-JMPQ-RVWX"),
+            "ghsa lowercase prefix": entry(id="ghsa-cfgh-jmpq-rvwx"),
+            "ghsa letter outside the alphabet": entry(id="GHSA-cfgh-jmpq-rvwa"),
+            "ghsa wildcard": entry(id="GHSA-cfgh-jmpq-rv*x"),
+            "ghsa trailing newline": entry(id="GHSA-cfgh-jmpq-rvwx\n"),
             "empty package": entry(package=" "),
             "package with space": entry(package="lib foo"),
             "empty reason": entry(reason=" "),
@@ -147,6 +156,14 @@ class Schema(unittest.TestCase):
         for name, e in bad.items():
             with self.subTest(name):
                 self.assertTrue(self.errors(e), name)
+
+    def test_a_digit_free_ghsa_id_validates(self):
+        self.assertEqual(self.errors(entry(id="GHSA-cfgh-jmpq-rvwx")), [])
+
+    def test_secret_rule_ids_stay_refused_beside_ghsa(self):
+        for rid in ("aws-access-key-id", "github-pat", "ghsa-cfgh-jmpq-rvwx", "private-key"):
+            with self.subTest(rid):
+                self.assertIn("secrets never qualify", self.errors(entry(id=rid))[0])
 
     def test_secret_targeting_entries_say_why(self):
         for key in ("secret", "rule", "RuleID", "rule_id"):
@@ -356,6 +373,18 @@ class Generate(unittest.TestCase):
             e["reason"] = "the vendor has not rebuilt the image"
         self.assertEqual(ie.schema_errors(entries, TODAY), [])
         self.assertEqual(len(evaluate(entries, [finding(), finding("CVE-2026-0002", "libbar")])["excepted"]), 2)
+
+    def test_a_drafted_digit_free_ghsa_entry_validates_once_completed_and_excepts(self):
+        ghsa = "GHSA-cfgh-jmpq-rvwx"
+        path = self.save(report([vuln(ghsa)]))
+        code, out, err = self.run_generate("--scan", REF, path, "--reviewer", "reviewer-one", "--reviewed", "2026-10-27")
+        self.assertEqual(code, 0, err)
+        entries = json.loads(out)["exceptions"]
+        self.assertEqual([e["id"] for e in entries], [ghsa])
+        entries[0]["reason"] = "the vendor has not rebuilt the image"
+        self.assertEqual(ie.schema_errors(entries, TODAY), [])
+        verdict = evaluate(entries, [finding(ghsa)])
+        self.assertEqual((len(verdict["excepted"]), verdict["failing"]), (1, []))
 
     def test_days_sets_the_expiry(self):
         _, out, _ = self.run_generate("--scan", REF, self.default_report(), "--reviewed", "2026-10-27", "--days", "7")
