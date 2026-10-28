@@ -21,6 +21,20 @@ on:
         required: false
         default: .github/image-exceptions.json
         type: string
+      secret-allowlist-file:
+        description: >-
+          Path of the secret allowlist file in the caller's repository
+          (docs/IMAGE_EXCEPTIONS.md), a different file with a different schema
+          than exceptions-file. It lets a known-public secret found in an image
+          layer, such as a documented emulator key, pass. A missing file means
+          no allowlist. A file that exists but is not valid fails the job. An
+          entry binds one finding (rule, file, layer and line) to one image
+          sha256 digest, with a reason, an https evidence link, a reviewer and
+          an expiry of at most 31 days; it never applies to a vulnerability, to
+          another scan or to an image listed without a digest.
+        required: false
+        default: .github/image-secret-allowlist.json
+        type: string
       upload-sarif:
         description: >-
           Upload the SARIF reports to GitHub code scanning. Set false for a
@@ -123,6 +137,7 @@ jobs:
         env:
           IMAGES: ${{ inputs.images }}
           EXCEPTIONS_FILE: ${{ inputs.exceptions-file }}
+          SECRET_ALLOWLIST_FILE: ${{ inputs.secret-allowlist-file }}
         run: python3 -I .strange-security/scripts/trivy_images.py plan
 
   scan:
@@ -173,6 +188,7 @@ jobs:
           test -d .strange-security/scanner-images
           test -f .strange-security/scripts/trivy_images.py
           test -f .strange-security/scripts/image_exceptions.py
+          test -f .strange-security/scripts/image_secret_allowlist.py
 
       # Image version lives in scanner-images/trivy.Dockerfile, the single spot Dependabot updates.
       - name: Build Trivy image
@@ -215,7 +231,8 @@ jobs:
 
       # The JSON reports are unfiltered and exit 0: the gate script decides.
       # Unfiltered by severity also for secrets: some built-in secret rules
-      # are below HIGH, and any secret fails.
+      # are below HIGH, and any secret fails unless the secret allowlist
+      # covers that finding. Trivy's own ignore files are not read here.
       - name: Run Trivy secret scan
         env:
           REFERENCE: ${{ matrix.reference }}
@@ -245,21 +262,25 @@ jobs:
             "$REFERENCE"
 
       # Fail-closed: any fixable HIGH or CRITICAL vulnerability that no valid,
-      # unexpired, digest-bound exception covers, any secret, an expired
-      # exception, a missing or malformed report, or an invalid exceptions file
-      # fails the job. The script's exit status is the job status. Writes the
-      # step summary. Runs after both scans succeeded.
+      # unexpired, digest-bound exception covers, any secret that no valid,
+      # unexpired, digest-bound allowlist entry covers (one entry, one finding),
+      # an expired entry in either file, a missing or malformed report, or an
+      # invalid exceptions or allowlist file fails the job. The script's exit
+      # status is the job status. Writes the step summary. Runs after both
+      # scans succeeded.
       - name: Gate image
         id: gate
         env:
           REFERENCE: ${{ matrix.reference }}
           EXCEPTIONS_FILE: ${{ inputs.exceptions-file }}
+          SECRET_ALLOWLIST_FILE: ${{ inputs.secret-allowlist-file }}
         run: |
           python3 -I .strange-security/scripts/trivy_images.py gate \
             --reference "$REFERENCE" \
             --vuln "$RUNNER_TEMP/trivy-images/out/vuln.json" \
             --secret "$RUNNER_TEMP/trivy-images/out/secret.json" \
-            --exceptions-file "$EXCEPTIONS_FILE"
+            --exceptions-file "$EXCEPTIONS_FILE" \
+            --secret-allowlist-file "$SECRET_ALLOWLIST_FILE"
 
       # SARIF for code scanning is a second pass over the same image and the
       # same DB cache, with the filters trivy-image.yml uses. It never gates:
