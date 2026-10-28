@@ -71,7 +71,8 @@ Trivy suppression: the digest-bound, reviewed, expiring image exceptions of
 `trivy-images.yml`, described in [IMAGE_EXCEPTIONS.md](IMAGE_EXCEPTIONS.md).
 They apply only to that workflow's image vulnerabilities, never to a secret,
 the filesystem scan, `trivy-image.yml`, gitleaks or Semgrep, and they do not
-make `.trivyignore` or `trivy.yaml` acceptable.
+make `.trivyignore` or `trivy.yaml` acceptable. The same goes for the image
+secret allowlist described under Secrets below.
 
 ## Gitleaks
 
@@ -80,8 +81,32 @@ then clean up. Only a reviewed false positive may go in `.gitleaksignore`, as
 its exact fingerprint with a comment saying why it is not a secret. Do not
 widen `.gitleaks.toml` allowlists to pass the gate.
 
+## Secrets
+
+A secret finding means the credential is already exposed. Rotate it first, then
+clean up. A secret is never suppressed in source, never with an inline comment,
+never in `.gitleaks.toml` or `.gitleaksignore` beyond the reviewed false
+positive above, and never in a filesystem scan (`trivy.yml`): no `.trivyignore`
+entry, no `trivy.yaml` exclusion, no Semgrep suppression.
+
+The one exception is narrow and is not a suppression in the repository being
+scanned. A secret that Trivy finds in a layer of a published image, and that is
+public by design (a documented emulator or test key vendored in a third-party
+library), may be allowed by an entry of the image secret allowlist
+(`.github/image-secret-allowlist.json`, read only by `trivy-images.yml`). An
+entry binds one finding to one image digest, layer, file, rule and line. It
+carries a reason, an `https` evidence link to the public source of the value, a
+named reviewer and an expiry of at most 31 days, and the gate lists it in the
+job summary. If the value might be a real credential, rotate it first; it is not
+allowlisted. The process is in
+[IMAGE_EXCEPTIONS.md](IMAGE_EXCEPTIONS.md#known-public-secrets-the-secret-allowlist).
+A pull request that adds or renews an allowlist entry is security-relevant:
+review it as such.
+
 ## Reviewing
 
 Changes to `.semgrepignore`, `.trivyignore`, `trivy.yaml`, `.gitleaks.toml` and
-`.gitleaksignore`, and any added `nosemgrep` line, are security-relevant. Review
+`.gitleaksignore`, any added `nosemgrep` line, and any added or renewed entry of
+`.github/image-exceptions.json` or `.github/image-secret-allowlist.json`, are
+security-relevant. Review
 them as such.
