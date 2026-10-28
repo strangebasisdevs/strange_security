@@ -111,6 +111,18 @@ class Clean(unittest.TestCase):
                 self.assertNotIn("##[", cleaned)
                 self.assertNotRegex(cleaned, "[|`\x00-\x1f\x7f-\x9f  ]")
 
+    def test_no_colon_run_or_hash_bracket_survives(self):
+        values = [":" * n for n in range(2, 40)] + ["a::b:::c", "x::::y", "::::error::::", "a" + ":" * 201,
+                  "###[", "####[x", "##[[", "##[##[", "# ##[", "##" * 50 + "[", "#:#:##[:::"]
+        for value in values:
+            for name, func in (("clean", ti.clean), ("cell", ti.cell)):
+                with self.subTest(value=value, func=name):
+                    out = func(value)
+                    self.assertNotIn("::", out)
+                    self.assertNotIn("##[", out)
+        self.assertEqual(ti.clean(":::"), ": : :")
+        self.assertEqual(ti.clean("a::b"), "a: :b")
+
     def test_format_characters_are_shown_as_visible_escapes(self):
         self.assertEqual(ti.clean("a\u202eb\u200bc\ufeffd\U000e0001"), r"a\u202eb\u200bc\ufeffd\U000e0001")
         self.assertEqual(ti.cell("a\u202eb"), "a&#92;u202eb")

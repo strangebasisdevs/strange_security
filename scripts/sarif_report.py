@@ -105,7 +105,8 @@ def cell(value, limit=MESSAGE_LIMIT):
 
 def prop(value, limit=300):
     """A workflow command property value (file=, title=): no control character,
-    no invisible format character (shown as a backslash-u escape), and % : , escaped
+    no invisible format character and no lone surrogate (both shown as a backslash-u
+    escape by escape_format()), and % : , escaped
     so the value cannot end the property list or the command."""
     text = _helpers()[2]("" if value is None else str(value))
     text = _UNSAFE_PROPERTY.sub(" ", text).strip()
@@ -133,7 +134,8 @@ def file_prop(path):
 
 
 def data(value, limit=300):
-    """A workflow command message: clean() (no :: or ##[) with % escaped."""
+    """A workflow command message: clean() (no :: or ##[; control, format and lone
+    surrogate characters already escaped) with % escaped."""
     return clean(value, limit).replace("%", "%25")
 
 

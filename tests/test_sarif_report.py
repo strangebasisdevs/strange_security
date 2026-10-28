@@ -621,6 +621,17 @@ class Hostile(unittest.TestCase):
         self.assertEqual(sr.prop("a:b,c%d\ne"), "a%3Ab%2Cc%25d e")
         self.assertEqual(sr.data("x::error::y\n##[z]%"), "x: :error: :y ##[z]%25".replace("##[", "# #["))
 
+    def test_data_and_cell_never_hold_a_colon_pair_or_hash_bracket(self):
+        values = [":" * n for n in range(2, 40)] + ["a::b:::c", "x::::y", "a" + ":" * 201,
+                  "###[", "####[x", "##[[", "##[##[", "# ##[", "##" * 50 + "[", "#:#:##[:::"]
+        for value in values:
+            for name, func in (("data", sr.data), ("cell", sr.cell), ("clean", sr.clean)):
+                with self.subTest(value=value, func=name):
+                    out = func(value)
+                    self.assertNotIn("::", out)
+                    self.assertNotIn("##[", out)
+        self.assertEqual(sr.data("a:::b"), "a: : :b")
+
     def test_long_values_are_truncated(self):
         r = Runner(self)
         r.write(sarif([result("r" * 500, "m" * 1000, uri="p" * 1000)]))

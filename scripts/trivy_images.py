@@ -78,10 +78,16 @@ def escape_format(text):
 def clean(value, limit=200):
     """Untrusted text made safe for a log line and a Markdown table cell: no
     control characters, no invisible format characters (shown as backslash-u escapes), no
-    workflow command, no pipe or backtick."""
+    workflow command (no "::" and no "##[" in the result, however long a run of colons or
+    hashes the input holds), no pipe or backtick. Lone surrogates and format characters are
+    escaped first by escape_format()."""
     text = escape_format("" if value is None else str(value))
     text = re.sub(r"[\x00-\x1f\x7f-\x9f  ]", " ", text)
-    text = text.replace("::", ": :").replace("##[", "# #[")
+    # Every run of 2+ colons gets a space between each pair of colons, so no "::" survives
+    # (":::" would still hold one after a single replace("::", ": :")). Inserting a space
+    # into "##[" cannot re-form the token, so one pass is enough there.
+    text = re.sub(r":{2,}", lambda m: " ".join(m.group()), text)
+    text = text.replace("##[", "# #[")
     text = text.replace("|", "/").replace("`", "'")
     text = text.strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."
