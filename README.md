@@ -523,6 +523,8 @@ keeps a separate code scanning result for each. The runner's Docker daemon
 pulls the image (after logging in, if asked to), and Trivy reads it through the Docker
 socket, so the registry credentials never enter the Trivy container. The
 caller's `.trivyignore` and `trivy.yaml` apply, as for the filesystem scan.
+The disk-space step and the scratch directory for Trivy's export are described
+under "Runner disk" in [Trivy images](#trivy-images).
 
 ### Trivy images
 
@@ -573,7 +575,10 @@ daemon's own copy, and on 2026-10-29 that filled the disk for
 device"). Trivy's `TMPDIR` is therefore a scratch directory mounted at
 `/scratch`: `/mnt/trivy-images/tmp` on the runner's large second volume when
 `/mnt` is a writable mount point, otherwise a directory under `RUNNER_TEMP` (a
-notice says so). What is scanned and how the gate decides do not change; an
+notice says so). The step only runs on GitHub-hosted runners (it checks
+`RUNNER_ENVIRONMENT`), which are single-use VMs, and leaves a self-hosted
+runner's toolchains alone; likewise `/mnt` is used only there, and only if
+`/mnt/trivy-images` does not already exist. What is scanned and how the gate decides do not change; an
 image larger than roughly 20 GB uncompressed may still need a larger runner.
 
 ### Gitleaks

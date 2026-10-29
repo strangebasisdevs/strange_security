@@ -197,15 +197,39 @@ class Workflows(unittest.TestCase):
                 self.assertEqual(body.count("rm "), len(removed))
                 self.assertEqual(body.count("sudo "), len(removed))
                 self.assertNotIn("${{", text)
-                self.assertNotIn("$", body)
+                # The one variable allowed is the runner-set guard; nothing else expands.
+                self.assertIn('"${RUNNER_ENVIRONMENT:-}"', body)
+                self.assertNotIn("$", body.replace('"${RUNNER_ENVIRONMENT:-}"', ""))
                 self.assertNotIn("*", body)
                 self.assertNotIn("prune", body)
                 self.assertEqual(body.count("df -h"), 2)
+                self.assertEqual(body.count("df -h / /mnt || true"), 2)
                 for path in removed:
                     self.assertRegex(path, r"^/(usr|opt)/[A-Za-z0-9._/-]+$")
                     self.assertNotRegex(path, r"\.\.|//|/$")
                     self.assertGreaterEqual(path.count("/"), 2, path)
                     self.assertIn("if [ -d %s ]; then sudo rm -rf %s; fi" % (path, path), body)
+
+    def test_free_runner_disk_removals_sit_inside_the_github_hosted_guard(self):
+        guard = 'if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then'
+        for name in self.IMAGE_WORKFLOWS:
+            lines = self.free_disk_body(name).split("\n")
+            stripped = [line.strip() for line in lines]
+            with self.subTest(workflow=name):
+                self.assertEqual(stripped.count(guard), 1)
+                self.assertEqual(stripped.count("else"), 1)
+                opened = stripped.index(guard)
+                other = stripped.index("else")
+                self.assertLess(opened, other)
+                removals = [i for i, line in enumerate(lines) if "sudo rm -rf" in line]
+                self.assertGreaterEqual(len(removals), 5)
+                for i in removals:
+                    self.assertTrue(opened < i < other, lines[i])
+                # The else branch only says so; the df lines stay outside the guard.
+                self.assertIn("::notice::Not a GitHub-hosted runner", lines[other + 1])
+                self.assertNotIn("sudo", "\n".join(lines[other:]))
+                self.assertEqual([i for i, line in enumerate(lines) if "df -h" in line],
+                                 [i for i, line in enumerate(lines) if "df -h" in line and not opened < i < other])
 
     def test_free_runner_disk_steps_are_identical(self):
         bodies = set()
@@ -221,6 +245,7 @@ class Workflows(unittest.TestCase):
                 for command in runs:
                     self.assertIn('--volume "$SCRATCH:/scratch"', command)
                     self.assertIn("--env TMPDIR=/scratch", command)
+                    self.assertEqual(command.count("--env TMPDIR"), 1)
                     # The export must stay the docker one: the secret allowlist's layer
                     # binding was verified against docker-source output.
                     self.assertEqual(command.count("--image-src docker"), 1)
@@ -236,6 +261,17 @@ class Workflows(unittest.TestCase):
                 self.assertNotIn("${{", prepare)
                 self.assertIn("scratch=/mnt/trivy-images/tmp", prepare)
                 self.assertIn("mountpoint -q /mnt", prepare)
+                # /mnt is used only on a GitHub-hosted runner, and a pre-existing or
+                # symlinked /mnt/trivy-images is refused rather than adopted or chowned.
+                self.assertIn('[ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]', prepare)
+                self.assertIn("[ ! -e /mnt/trivy-images ]", prepare)
+                self.assertIn("[ ! -L /mnt/trivy-images ]", prepare)
+                self.assertIn("sudo mkdir -p /mnt/trivy-images/tmp", prepare)
+                self.assertEqual(len(re.findall(r"(?m)^\s*scratch=", prepare)), 2)
+                fallback = prepare[prepare.index("else"):prepare.index("fi\n")]
+                self.assertIn('scratch="$RUNNER_TEMP/trivy-images/tmp"', fallback)
+                self.assertNotIn("sudo", fallback)
+                self.assertNotIn("chown", read(name))
                 self.assertIn('scratch="$RUNNER_TEMP/trivy-images/tmp"', prepare)
                 self.assertIn("::notice::", prepare)
                 self.assertIn('echo "scratch=$scratch" >> "$GITHUB_OUTPUT"', prepare)

@@ -283,18 +283,24 @@ jobs:
       # only: nothing here is built from an input, a variable or a glob, and a
       # path that is absent is skipped, so a rerun or another image is harmless.
       # No docker prune: the scanner image built just before this step must stay.
+      # Hosted runners are single-use VMs, so the removal runs only there
+      # (RUNNER_ENVIRONMENT); a self-hosted runner keeps its toolchains.
       - name: Free runner disk
         run: |
           echo "Disk before:"
           df -h / /mnt || true
-          if [ -d /usr/share/dotnet ]; then sudo rm -rf /usr/share/dotnet; fi
-          if [ -d /usr/local/lib/android ]; then sudo rm -rf /usr/local/lib/android; fi
-          if [ -d /opt/ghc ]; then sudo rm -rf /opt/ghc; fi
-          if [ -d /usr/local/.ghcup ]; then sudo rm -rf /usr/local/.ghcup; fi
-          if [ -d /opt/hostedtoolcache/CodeQL ]; then sudo rm -rf /opt/hostedtoolcache/CodeQL; fi
-          if [ -d /usr/share/swift ]; then sudo rm -rf /usr/share/swift; fi
-          if [ -d /usr/local/share/powershell ]; then sudo rm -rf /usr/local/share/powershell; fi
-          if [ -d /usr/local/share/chromium ]; then sudo rm -rf /usr/local/share/chromium; fi
+          if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then
+            if [ -d /usr/share/dotnet ]; then sudo rm -rf /usr/share/dotnet; fi
+            if [ -d /usr/local/lib/android ]; then sudo rm -rf /usr/local/lib/android; fi
+            if [ -d /opt/ghc ]; then sudo rm -rf /opt/ghc; fi
+            if [ -d /usr/local/.ghcup ]; then sudo rm -rf /usr/local/.ghcup; fi
+            if [ -d /opt/hostedtoolcache/CodeQL ]; then sudo rm -rf /opt/hostedtoolcache/CodeQL; fi
+            if [ -d /usr/share/swift ]; then sudo rm -rf /usr/share/swift; fi
+            if [ -d /usr/local/share/powershell ]; then sudo rm -rf /usr/local/share/powershell; fi
+            if [ -d /usr/local/share/chromium ]; then sudo rm -rf /usr/local/share/chromium; fi
+          else
+            echo "::notice::Not a GitHub-hosted runner: leaving the host's toolchains alone"
+          fi
           echo "Disk after:"
           df -h / /mnt || true
 
@@ -328,19 +334,22 @@ jobs:
       # a caller's .trivyignore or trivy.yaml cannot suppress a finding here.
       # Trivy's --image-src docker export goes to TMPDIR inside the scanner
       # container, so it is pointed at a bind-mounted scratch directory. The
-      # runner's separate /mnt volume is large and nearly empty; without a
-      # writable /mnt mount the scratch directory falls back to RUNNER_TEMP.
+      # runner's separate /mnt volume is large and nearly empty. It is used only on
+      # a GitHub-hosted runner, and only if /mnt is a mount point and
+      # /mnt/trivy-images does not exist yet (a pre-existing path is refused, not
+      # adopted); otherwise the scratch directory falls back to RUNNER_TEMP. The
+      # pinned scanner image runs as root, so the host path's owner does not matter.
       - name: Prepare scan directories
         id: dirs
         run: |
           mkdir -p "$RUNNER_TEMP/trivy-images/out" "$RUNNER_TEMP/trivy-images/cache"
           scratch=/mnt/trivy-images/tmp
-          if mountpoint -q /mnt && sudo mkdir -p "$scratch" && sudo chown "$(id -u):$(id -g)" /mnt/trivy-images "$scratch"; then
+          if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] && mountpoint -q /mnt && [ ! -e /mnt/trivy-images ] && [ ! -L /mnt/trivy-images ] && sudo mkdir -p /mnt/trivy-images/tmp; then
             echo "Scratch directory on /mnt: $scratch"
           else
             scratch="$RUNNER_TEMP/trivy-images/tmp"
             mkdir -p "$scratch"
-            echo "::notice::/mnt is not a writable mount point, so Trivy's temporary export uses $scratch on the root disk"
+            echo "::notice::/mnt is not usable here (not a GitHub-hosted runner, not a mount point, or /mnt/trivy-images already exists), so Trivy's temporary export uses $scratch on the root disk"
           fi
           echo "scratch=$scratch" >> "$GITHUB_OUTPUT"
 
