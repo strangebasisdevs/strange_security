@@ -176,11 +176,12 @@ jobs:
             --tag trivy-scanner \
             .strange-security
 
-      # Hosted ubuntu-24.04 runners keep only some 20-30 GB free on /, and Trivy's
-      # --image-src docker exports a full uncompressed copy of the image on top of
-      # the daemon's own copy. On 2026-10-29 the secret scan of
-      # ghcr.io/open-webui/open-webui and ollama/ollama died with "write
-      # /tmp/trivy-.../docker-export-...: no space left on device" at 26 MB free.
+      # A hosted ubuntu-24.04 runner has a single 145 GB root disk (2026-10-29: 59 GB
+      # used before this step), and Trivy's --image-src docker exports a full
+      # uncompressed copy of the image on top of the daemon's own copy. On
+      # 2026-10-29 the secret scan of ghcr.io/open-webui/open-webui and
+      # ollama/ollama died with "write /tmp/trivy-.../docker-export-...: no space
+      # left on device" at 26 MB free.
       # Removes the preinstalled toolchains this job never uses, literal paths
       # only: nothing here is built from an input, a variable or a glob, and a
       # path that is absent is skipped, so a rerun or another image is harmless.
