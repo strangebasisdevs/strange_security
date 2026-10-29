@@ -157,6 +157,126 @@ class Workflows(unittest.TestCase):
         login = step(read("trivy-image.yml"), "Log in to GitHub Container Registry")
         self.assertIn("if: ${{ inputs.registry-login }}", login[:login.index("run:")])
 
+    IMAGE_WORKFLOWS = ("trivy-image.yml", "trivy-images.yml")
+
+    def scanner_runs(self, name):
+        """Every `docker run ... trivy-scanner` command of a workflow, continuation lines joined."""
+        runs = []
+        for block in run_blocks(read(name)):
+            for command in re.sub(r"\\\n", " ", block).split("\n"):
+                if re.match(r"\s*docker run\b", command) and "trivy-scanner" in command:
+                    runs.append(" ".join(command.split()))
+        return runs
+
+    def free_disk_body(self, name):
+        """The shell script of the Free runner disk step, without the comments of the next step."""
+        text = step(read(name), "Free runner disk")
+        body = text[text.index("run: |"):]
+        last = body.rindex("df -h")
+        return body[:last] + body[last:].split(chr(10))[0]
+
+    def test_runner_disk_is_freed_before_login_and_pull(self):
+        for name in self.IMAGE_WORKFLOWS:
+            text = read(name)
+            order = re.findall(r"(?m)^      - name: (.*)$", text)
+            with self.subTest(workflow=name):
+                self.assertEqual(order.count("Free runner disk"), 1)
+                free = order.index("Free runner disk")
+                self.assertLess(free, order.index("Log in to GitHub Container Registry"))
+                self.assertLess(free, order.index("Pull image"))
+                self.assertLess(free, order.index("Run Trivy secret scan"))
+                self.assertNotIn("continue-on-error", step(text, "Free runner disk"))
+
+    def test_free_runner_disk_only_removes_literal_toolchain_paths(self):
+        for name in self.IMAGE_WORKFLOWS:
+            text = step(read(name), "Free runner disk")
+            body = self.free_disk_body(name)
+            removed = re.findall(r"sudo rm -rf (\S+?);", body)
+            with self.subTest(workflow=name):
+                self.assertGreaterEqual(len(removed), 5)
+                self.assertEqual(body.count("rm "), len(removed))
+                self.assertEqual(body.count("sudo "), len(removed))
+                self.assertNotIn("${{", text)
+                # Two variables are allowed: the runner-set guard and the temp directory
+                # df reports on; nothing else expands.
+                self.assertIn('"${RUNNER_ENVIRONMENT:-}"', body)
+                self.assertEqual(body.count('"$RUNNER_TEMP"'), 2)
+                allowed = body.replace('"${RUNNER_ENVIRONMENT:-}"', "").replace('"$RUNNER_TEMP"', "")
+                self.assertNotIn("$", allowed)
+                self.assertNotIn("*", body)
+                self.assertNotIn("prune", body)
+                self.assertEqual(body.count("df -h"), 2)
+                self.assertEqual(body.count('df -h / "$RUNNER_TEMP" || true'), 2)
+                for path in removed:
+                    self.assertRegex(path, r"^/(usr|opt)/[A-Za-z0-9._/-]+$")
+                    self.assertNotRegex(path, r"\.\.|//|/$")
+                    self.assertGreaterEqual(path.count("/"), 2, path)
+                    self.assertIn("if [ -d %s ]; then sudo rm -rf %s; fi" % (path, path), body)
+
+    def test_free_runner_disk_removals_sit_inside_the_github_hosted_guard(self):
+        guard = 'if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then'
+        for name in self.IMAGE_WORKFLOWS:
+            lines = self.free_disk_body(name).split("\n")
+            stripped = [line.strip() for line in lines]
+            with self.subTest(workflow=name):
+                self.assertEqual(stripped.count(guard), 1)
+                self.assertEqual(stripped.count("else"), 1)
+                opened = stripped.index(guard)
+                other = stripped.index("else")
+                self.assertLess(opened, other)
+                removals = [i for i, line in enumerate(lines) if "sudo rm -rf" in line]
+                self.assertGreaterEqual(len(removals), 5)
+                for i in removals:
+                    self.assertTrue(opened < i < other, lines[i])
+                # The else branch only says so; the df lines stay outside the guard.
+                self.assertIn("::notice::Not a GitHub-hosted runner", lines[other + 1])
+                self.assertNotIn("sudo", "\n".join(lines[other:]))
+                self.assertEqual([i for i, line in enumerate(lines) if "df -h" in line],
+                                 [i for i, line in enumerate(lines) if "df -h" in line and not opened < i < other])
+
+    def test_free_runner_disk_steps_are_identical(self):
+        bodies = set()
+        for name in self.IMAGE_WORKFLOWS:
+            bodies.add(self.free_disk_body(name))
+        self.assertEqual(len(bodies), 1)
+
+    def test_every_scanner_run_writes_its_export_to_the_scratch_volume(self):
+        for name, expected in (("trivy-image.yml", 2), ("trivy-images.yml", 4)):
+            runs = self.scanner_runs(name)
+            with self.subTest(workflow=name):
+                self.assertEqual(len(runs), expected)
+                for command in runs:
+                    self.assertIn('--volume "$SCRATCH:/scratch"', command)
+                    self.assertIn("--env TMPDIR=/scratch", command)
+                    self.assertEqual(command.count("--env TMPDIR"), 1)
+                    # The export must stay the docker one: the secret allowlist's layer
+                    # binding was verified against docker-source output.
+                    self.assertEqual(command.count("--image-src docker"), 1)
+                    self.assertEqual(command.count("--image-src"), 1)
+
+    def test_scratch_directory_is_under_runner_temp(self):
+        for name, step_name, step_id in (("trivy-image.yml", "Prepare scan scratch directory", "scratch"),
+                                         ("trivy-images.yml", "Prepare scan directories", "dirs")):
+            text = read(name)
+            prepare = step(text, step_name)
+            with self.subTest(workflow=name):
+                self.assertIn("id: " + step_id, prepare)
+                self.assertNotIn("${{", prepare)
+                # A hosted runner has one disk (no separate /mnt volume), so there is
+                # nothing to choose between: plain mkdir, no privilege, no mount probing.
+                assignments = re.findall(r"(?m)^ *scratch=(.*)$", prepare)
+                self.assertEqual(assignments, ['"$RUNNER_TEMP/trivy-images/tmp"'])
+                for banned in ("sudo", "mountpoint", "/mnt", "RUNNER_ENVIRONMENT", "::notice::"):
+                    self.assertNotIn(banned, prepare)
+                self.assertNotIn("chown", read(name))
+                # The host /mnt must never reach the scanner container either.
+                self.assertNotIn("/mnt", read(name))
+                self.assertIn('mkdir -p "$scratch"', prepare)
+                self.assertIn('echo "scratch=$scratch" >> "$GITHUB_OUTPUT"', prepare)
+                self.assertLess(text.index(prepare), text.index("- name: Run Trivy secret scan"))
+                self.assertEqual(text.count("SCRATCH: ${{ steps.%s.outputs.scratch }}" % step_id),
+                                 len(self.scanner_runs(name)))
+
     def test_reusable_detection_recognises_every_form(self):
         forms = {
             "block": "name: X\non:\n  workflow_call:\n    inputs: {}\n",

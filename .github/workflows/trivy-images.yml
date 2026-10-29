@@ -274,6 +274,37 @@ jobs:
             --tag trivy-scanner \
             .strange-security
 
+      # A hosted ubuntu-24.04 runner has a single 145 GB root disk (2026-10-29: 59 GB
+      # used before this step), and Trivy's --image-src docker exports a full
+      # uncompressed copy of the image on top of the daemon's own copy. On
+      # 2026-10-29 the secret scan of ghcr.io/open-webui/open-webui and
+      # ollama/ollama died with "write /tmp/trivy-.../docker-export-...: no space
+      # left on device" at 26 MB free.
+      # Removes the preinstalled toolchains this job never uses, literal paths
+      # only: nothing here is built from an input, a variable or a glob, and a
+      # path that is absent is skipped, so a rerun or another image is harmless.
+      # No docker prune: the scanner image built just before this step must stay.
+      # Hosted runners are single-use VMs, so the removal runs only there
+      # (RUNNER_ENVIRONMENT); a self-hosted runner keeps its toolchains.
+      - name: Free runner disk
+        run: |
+          echo "Disk before:"
+          df -h / "$RUNNER_TEMP" || true
+          if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then
+            if [ -d /usr/share/dotnet ]; then sudo rm -rf /usr/share/dotnet; fi
+            if [ -d /usr/local/lib/android ]; then sudo rm -rf /usr/local/lib/android; fi
+            if [ -d /opt/ghc ]; then sudo rm -rf /opt/ghc; fi
+            if [ -d /usr/local/.ghcup ]; then sudo rm -rf /usr/local/.ghcup; fi
+            if [ -d /opt/hostedtoolcache/CodeQL ]; then sudo rm -rf /opt/hostedtoolcache/CodeQL; fi
+            if [ -d /usr/share/swift ]; then sudo rm -rf /usr/share/swift; fi
+            if [ -d /usr/local/share/powershell ]; then sudo rm -rf /usr/local/share/powershell; fi
+            if [ -d /usr/local/share/chromium ]; then sudo rm -rf /usr/local/share/chromium; fi
+          else
+            echo "::notice::Not a GitHub-hosted runner: leaving the host's toolchains alone"
+          fi
+          echo "Disk after:"
+          df -h / "$RUNNER_TEMP" || true
+
       # Optional, for private images only. Uses the docker CLI rather than a
       # third-party action. The token reaches docker through stdin from an
       # environment variable, never a command-line argument, and is referenced
@@ -302,8 +333,19 @@ jobs:
 
       # Trivy runs in an empty working directory, not the caller's checkout, so
       # a caller's .trivyignore or trivy.yaml cannot suppress a finding here.
+      # Trivy's docker export goes to TMPDIR inside the scanner container, which is
+      # bound to a directory under RUNNER_TEMP so the export is not written into
+      # the container's overlay. The root disk is the only disk on a hosted
+      # ubuntu-24.04 runner (2026-10-29 run: 145 GB, 59 GB used before the step,
+      # 32 GB after), so the removals above are what makes room. The pinned scanner
+      # image runs as root, so the host path's owner does not matter.
       - name: Prepare scan directories
-        run: mkdir -p "$RUNNER_TEMP/trivy-images/out" "$RUNNER_TEMP/trivy-images/cache"
+        id: dirs
+        run: |
+          mkdir -p "$RUNNER_TEMP/trivy-images/out" "$RUNNER_TEMP/trivy-images/cache"
+          scratch="$RUNNER_TEMP/trivy-images/tmp"
+          mkdir -p "$scratch"
+          echo "scratch=$scratch" >> "$GITHUB_OUTPUT"
 
       # The JSON reports are unfiltered and exit 0: the gate script decides.
       # Unfiltered by severity also for secrets: some built-in secret rules
@@ -312,11 +354,14 @@ jobs:
       - name: Run Trivy secret scan
         env:
           REFERENCE: ${{ matrix.reference }}
+          SCRATCH: ${{ steps.dirs.outputs.scratch }}
         run: |
           docker run --rm \
             --volume /var/run/docker.sock:/var/run/docker.sock \
             --volume "$RUNNER_TEMP/trivy-images/cache:/cache" \
             --volume "$RUNNER_TEMP/trivy-images/out:/out" \
+            --volume "$SCRATCH:/scratch" \
+            --env TMPDIR=/scratch \
             --workdir /out \
             trivy-scanner \
             image --cache-dir /cache --image-src docker --scanners secret \
@@ -326,11 +371,14 @@ jobs:
       - name: Run Trivy vulnerability scan
         env:
           REFERENCE: ${{ matrix.reference }}
+          SCRATCH: ${{ steps.dirs.outputs.scratch }}
         run: |
           docker run --rm \
             --volume /var/run/docker.sock:/var/run/docker.sock \
             --volume "$RUNNER_TEMP/trivy-images/cache:/cache" \
             --volume "$RUNNER_TEMP/trivy-images/out:/out" \
+            --volume "$SCRATCH:/scratch" \
+            --env TMPDIR=/scratch \
             --workdir /out \
             trivy-scanner \
             image --cache-dir /cache --image-src docker --scanners vuln \
@@ -365,11 +413,14 @@ jobs:
         if: ${{ !cancelled() && inputs.upload-sarif && steps.pull.outcome == 'success' }}
         env:
           REFERENCE: ${{ matrix.reference }}
+          SCRATCH: ${{ steps.dirs.outputs.scratch }}
         run: |
           docker run --rm \
             --volume /var/run/docker.sock:/var/run/docker.sock \
             --volume "$RUNNER_TEMP/trivy-images/cache:/cache" \
             --volume "$RUNNER_TEMP/trivy-images/out:/out" \
+            --volume "$SCRATCH:/scratch" \
+            --env TMPDIR=/scratch \
             --workdir /out \
             trivy-scanner \
             image --cache-dir /cache --image-src docker --scanners secret \
@@ -380,11 +431,14 @@ jobs:
         if: ${{ !cancelled() && inputs.upload-sarif && steps.pull.outcome == 'success' }}
         env:
           REFERENCE: ${{ matrix.reference }}
+          SCRATCH: ${{ steps.dirs.outputs.scratch }}
         run: |
           docker run --rm \
             --volume /var/run/docker.sock:/var/run/docker.sock \
             --volume "$RUNNER_TEMP/trivy-images/cache:/cache" \
             --volume "$RUNNER_TEMP/trivy-images/out:/out" \
+            --volume "$SCRATCH:/scratch" \
+            --env TMPDIR=/scratch \
             --workdir /out \
             trivy-scanner \
             image --cache-dir /cache --image-src docker --scanners vuln \

@@ -523,6 +523,8 @@ keeps a separate code scanning result for each. The runner's Docker daemon
 pulls the image (after logging in, if asked to), and Trivy reads it through the Docker
 socket, so the registry credentials never enter the Trivy container. The
 caller's `.trivyignore` and `trivy.yaml` apply, as for the filesystem scan.
+The disk-space step and the scratch directory for Trivy's export are described
+under "Runner disk" in [Trivy images](#trivy-images).
 
 ### Trivy images
 
@@ -561,6 +563,26 @@ vulnerability SARIF per image (the gate does not depend on it), uploaded to the
 `trivy-images-secret/<repository>` and `trivy-images/<repository>` categories,
 which differ from those of `trivy-image.yml` so the two cannot overwrite each
 other.
+
+Runner disk: before the pull, a "Free runner disk" step in `trivy-images.yml`
+and `trivy-image.yml` removes the toolchains a hosted `ubuntu-24.04` runner
+preinstalls and these jobs never use (.NET, the Android SDK, GHC and ghcup,
+the CodeQL bundle, Swift, PowerShell and Chromium), by literal path and only if
+present, and prints `df -h` for `/` and `RUNNER_TEMP` before and after. With
+`--image-src docker` Trivy exports a full uncompressed copy of the image into
+its `TMPDIR`, on top of the daemon's own copy, and on 2026-10-29 that filled
+the disk for `ghcr.io/open-webui/open-webui` and `ollama/ollama` ("no space
+left on device"). The removals are what make room: on a hosted `ubuntu-24.04`
+runner they took used space from 59 GB to 32 GB of 145 GB (2026-10-29 run).
+`/mnt` is not a separate volume on these runners, so there is no second disk
+to use. Trivy's `TMPDIR` is a scratch directory under `RUNNER_TEMP`, mounted
+at `/scratch`, so the export lands on the disk the step just freed instead of
+in the scanner container's overlay (a caller whose runner has a larger temp
+disk benefits automatically). The removals run only on GitHub-hosted runners
+(the step checks `RUNNER_ENVIRONMENT`), which are single-use VMs; a
+self-hosted runner's toolchains are left alone and a notice says so. What is
+scanned and how the gate decides do not change; an image larger than roughly
+40 GB uncompressed may still need a larger runner.
 
 ### Gitleaks
 
