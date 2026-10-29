@@ -176,6 +176,30 @@ jobs:
             --tag trivy-scanner \
             .strange-security
 
+      # Hosted ubuntu-24.04 runners keep only some 20-30 GB free on /, and Trivy's
+      # --image-src docker exports a full uncompressed copy of the image on top of
+      # the daemon's own copy. On 2026-10-29 the secret scan of
+      # ghcr.io/open-webui/open-webui and ollama/ollama died with "write
+      # /tmp/trivy-.../docker-export-...: no space left on device" at 26 MB free.
+      # Removes the preinstalled toolchains this job never uses, literal paths
+      # only: nothing here is built from an input, a variable or a glob, and a
+      # path that is absent is skipped, so a rerun or another image is harmless.
+      # No docker prune: the scanner image built just before this step must stay.
+      - name: Free runner disk
+        run: |
+          echo "Disk before:"
+          df -h / /mnt || true
+          if [ -d /usr/share/dotnet ]; then sudo rm -rf /usr/share/dotnet; fi
+          if [ -d /usr/local/lib/android ]; then sudo rm -rf /usr/local/lib/android; fi
+          if [ -d /opt/ghc ]; then sudo rm -rf /opt/ghc; fi
+          if [ -d /usr/local/.ghcup ]; then sudo rm -rf /usr/local/.ghcup; fi
+          if [ -d /opt/hostedtoolcache/CodeQL ]; then sudo rm -rf /opt/hostedtoolcache/CodeQL; fi
+          if [ -d /usr/share/swift ]; then sudo rm -rf /usr/share/swift; fi
+          if [ -d /usr/local/share/powershell ]; then sudo rm -rf /usr/local/share/powershell; fi
+          if [ -d /usr/local/share/chromium ]; then sudo rm -rf /usr/local/share/chromium; fi
+          echo "Disk after:"
+          df -h / /mnt || true
+
       # Optional, for private images only. Uses the docker CLI rather than a
       # third-party action. The token reaches docker through stdin from an
       # environment variable, never a command-line argument, and is referenced
@@ -204,15 +228,35 @@ jobs:
           REFERENCE: ${{ steps.ref.outputs.reference }}
         run: docker pull "$REFERENCE"
 
+      # Trivy's --image-src docker export goes to TMPDIR inside the scanner
+      # container, so it is pointed at a bind-mounted scratch directory. The
+      # runner's separate /mnt volume is large and nearly empty; without a
+      # writable /mnt mount the scratch directory falls back to RUNNER_TEMP.
+      - name: Prepare scan scratch directory
+        id: scratch
+        run: |
+          scratch=/mnt/trivy-images/tmp
+          if mountpoint -q /mnt && sudo mkdir -p "$scratch" && sudo chown "$(id -u):$(id -g)" /mnt/trivy-images "$scratch"; then
+            echo "Scratch directory on /mnt: $scratch"
+          else
+            scratch="$RUNNER_TEMP/trivy-images/tmp"
+            mkdir -p "$scratch"
+            echo "::notice::/mnt is not a writable mount point, so Trivy's temporary export uses $scratch on the root disk"
+          fi
+          echo "scratch=$scratch" >> "$GITHUB_OUTPUT"
+
       # Unfiltered by severity: --severity also filters the secret scanner,
       # and some built-in secret rules are below HIGH. Any secret fails.
       - name: Run Trivy secret scan
         env:
           REFERENCE: ${{ steps.ref.outputs.reference }}
+          SCRATCH: ${{ steps.scratch.outputs.scratch }}
         run: |
           docker run --rm \
             --volume /var/run/docker.sock:/var/run/docker.sock \
             --volume "$PWD:/src" \
+            --volume "$SCRATCH:/scratch" \
+            --env TMPDIR=/scratch \
             --workdir /src \
             trivy-scanner \
             image --image-src docker --scanners secret \
@@ -224,10 +268,13 @@ jobs:
         if: ${{ !cancelled() && steps.pull.outcome == 'success' }}
         env:
           REFERENCE: ${{ steps.ref.outputs.reference }}
+          SCRATCH: ${{ steps.scratch.outputs.scratch }}
         run: |
           docker run --rm \
             --volume /var/run/docker.sock:/var/run/docker.sock \
             --volume "$PWD:/src" \
+            --volume "$SCRATCH:/scratch" \
+            --env TMPDIR=/scratch \
             --workdir /src \
             trivy-scanner \
             image --image-src docker --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
