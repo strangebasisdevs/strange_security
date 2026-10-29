@@ -269,6 +269,8 @@ class Workflows(unittest.TestCase):
                 for banned in ("sudo", "mountpoint", "/mnt", "RUNNER_ENVIRONMENT", "::notice::"):
                     self.assertNotIn(banned, prepare)
                 self.assertNotIn("chown", read(name))
+                # The host /mnt must never reach the scanner container either.
+                self.assertNotIn("/mnt", read(name))
                 self.assertIn('mkdir -p "$scratch"', prepare)
                 self.assertIn('echo "scratch=$scratch" >> "$GITHUB_OUTPUT"', prepare)
                 self.assertLess(text.index(prepare), text.index("- name: Run Trivy secret scan"))
