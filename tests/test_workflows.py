@@ -197,13 +197,16 @@ class Workflows(unittest.TestCase):
                 self.assertEqual(body.count("rm "), len(removed))
                 self.assertEqual(body.count("sudo "), len(removed))
                 self.assertNotIn("${{", text)
-                # The one variable allowed is the runner-set guard; nothing else expands.
+                # Two variables are allowed: the runner-set guard and the temp directory
+                # df reports on; nothing else expands.
                 self.assertIn('"${RUNNER_ENVIRONMENT:-}"', body)
-                self.assertNotIn("$", body.replace('"${RUNNER_ENVIRONMENT:-}"', ""))
+                self.assertEqual(body.count('"$RUNNER_TEMP"'), 2)
+                allowed = body.replace('"${RUNNER_ENVIRONMENT:-}"', "").replace('"$RUNNER_TEMP"', "")
+                self.assertNotIn("$", allowed)
                 self.assertNotIn("*", body)
                 self.assertNotIn("prune", body)
                 self.assertEqual(body.count("df -h"), 2)
-                self.assertEqual(body.count("df -h / /mnt || true"), 2)
+                self.assertEqual(body.count('df -h / "$RUNNER_TEMP" || true'), 2)
                 for path in removed:
                     self.assertRegex(path, r"^/(usr|opt)/[A-Za-z0-9._/-]+$")
                     self.assertNotRegex(path, r"\.\.|//|/$")
@@ -251,7 +254,7 @@ class Workflows(unittest.TestCase):
                     self.assertEqual(command.count("--image-src docker"), 1)
                     self.assertEqual(command.count("--image-src"), 1)
 
-    def test_scratch_directory_prefers_mnt_and_falls_back_to_runner_temp(self):
+    def test_scratch_directory_is_under_runner_temp(self):
         for name, step_name, step_id in (("trivy-image.yml", "Prepare scan scratch directory", "scratch"),
                                          ("trivy-images.yml", "Prepare scan directories", "dirs")):
             text = read(name)
@@ -259,21 +262,14 @@ class Workflows(unittest.TestCase):
             with self.subTest(workflow=name):
                 self.assertIn("id: " + step_id, prepare)
                 self.assertNotIn("${{", prepare)
-                self.assertIn("scratch=/mnt/trivy-images/tmp", prepare)
-                self.assertIn("mountpoint -q /mnt", prepare)
-                # /mnt is used only on a GitHub-hosted runner, and a pre-existing or
-                # symlinked /mnt/trivy-images is refused rather than adopted or chowned.
-                self.assertIn('[ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]', prepare)
-                self.assertIn("[ ! -e /mnt/trivy-images ]", prepare)
-                self.assertIn("[ ! -L /mnt/trivy-images ]", prepare)
-                self.assertIn("sudo mkdir -p /mnt/trivy-images/tmp", prepare)
-                self.assertEqual(len(re.findall(r"(?m)^\s*scratch=", prepare)), 2)
-                fallback = prepare[prepare.index("else"):prepare.index("fi\n")]
-                self.assertIn('scratch="$RUNNER_TEMP/trivy-images/tmp"', fallback)
-                self.assertNotIn("sudo", fallback)
+                # A hosted runner has one disk (no separate /mnt volume), so there is
+                # nothing to choose between: plain mkdir, no privilege, no mount probing.
+                assignments = re.findall(r"(?m)^ *scratch=(.*)$", prepare)
+                self.assertEqual(assignments, ['"$RUNNER_TEMP/trivy-images/tmp"'])
+                for banned in ("sudo", "mountpoint", "/mnt", "RUNNER_ENVIRONMENT", "::notice::"):
+                    self.assertNotIn(banned, prepare)
                 self.assertNotIn("chown", read(name))
-                self.assertIn('scratch="$RUNNER_TEMP/trivy-images/tmp"', prepare)
-                self.assertIn("::notice::", prepare)
+                self.assertIn('mkdir -p "$scratch"', prepare)
                 self.assertIn('echo "scratch=$scratch" >> "$GITHUB_OUTPUT"', prepare)
                 self.assertLess(text.index(prepare), text.index("- name: Run Trivy secret scan"))
                 self.assertEqual(text.count("SCRATCH: ${{ steps.%s.outputs.scratch }}" % step_id),

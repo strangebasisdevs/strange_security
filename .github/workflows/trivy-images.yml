@@ -288,7 +288,7 @@ jobs:
       - name: Free runner disk
         run: |
           echo "Disk before:"
-          df -h / /mnt || true
+          df -h / "$RUNNER_TEMP" || true
           if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then
             if [ -d /usr/share/dotnet ]; then sudo rm -rf /usr/share/dotnet; fi
             if [ -d /usr/local/lib/android ]; then sudo rm -rf /usr/local/lib/android; fi
@@ -302,7 +302,7 @@ jobs:
             echo "::notice::Not a GitHub-hosted runner: leaving the host's toolchains alone"
           fi
           echo "Disk after:"
-          df -h / /mnt || true
+          df -h / "$RUNNER_TEMP" || true
 
       # Optional, for private images only. Uses the docker CLI rather than a
       # third-party action. The token reaches docker through stdin from an
@@ -332,25 +332,18 @@ jobs:
 
       # Trivy runs in an empty working directory, not the caller's checkout, so
       # a caller's .trivyignore or trivy.yaml cannot suppress a finding here.
-      # Trivy's --image-src docker export goes to TMPDIR inside the scanner
-      # container, so it is pointed at a bind-mounted scratch directory. The
-      # runner's separate /mnt volume is large and nearly empty. It is used only on
-      # a GitHub-hosted runner, and only if /mnt is a mount point and
-      # /mnt/trivy-images does not exist yet (a pre-existing path is refused, not
-      # adopted); otherwise the scratch directory falls back to RUNNER_TEMP. The
-      # pinned scanner image runs as root, so the host path's owner does not matter.
+      # Trivy's docker export goes to TMPDIR inside the scanner container, which is
+      # bound to a directory under RUNNER_TEMP so the export is not written into
+      # the container's overlay. The root disk is the only disk on a hosted
+      # ubuntu-24.04 runner (2026-10-29 run: 145 GB, 59 GB used before the step,
+      # 32 GB after), so the removals above are what makes room. The pinned scanner
+      # image runs as root, so the host path's owner does not matter.
       - name: Prepare scan directories
         id: dirs
         run: |
           mkdir -p "$RUNNER_TEMP/trivy-images/out" "$RUNNER_TEMP/trivy-images/cache"
-          scratch=/mnt/trivy-images/tmp
-          if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] && mountpoint -q /mnt && [ ! -e /mnt/trivy-images ] && [ ! -L /mnt/trivy-images ] && sudo mkdir -p /mnt/trivy-images/tmp; then
-            echo "Scratch directory on /mnt: $scratch"
-          else
-            scratch="$RUNNER_TEMP/trivy-images/tmp"
-            mkdir -p "$scratch"
-            echo "::notice::/mnt is not usable here (not a GitHub-hosted runner, not a mount point, or /mnt/trivy-images already exists), so Trivy's temporary export uses $scratch on the root disk"
-          fi
+          scratch="$RUNNER_TEMP/trivy-images/tmp"
+          mkdir -p "$scratch"
           echo "scratch=$scratch" >> "$GITHUB_OUTPUT"
 
       # The JSON reports are unfiltered and exit 0: the gate script decides.

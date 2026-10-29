@@ -568,19 +568,21 @@ Runner disk: before the pull, a "Free runner disk" step in `trivy-images.yml`
 and `trivy-image.yml` removes the toolchains a hosted `ubuntu-24.04` runner
 preinstalls and these jobs never use (.NET, the Android SDK, GHC and ghcup,
 the CodeQL bundle, Swift, PowerShell and Chromium), by literal path and only if
-present, and prints `df -h` before and after. With `--image-src docker` Trivy
-exports a full uncompressed copy of the image into its `TMPDIR`, on top of the
-daemon's own copy, and on 2026-10-29 that filled the disk for
-`ghcr.io/open-webui/open-webui` and `ollama/ollama` ("no space left on
-device"). Trivy's `TMPDIR` is therefore a scratch directory mounted at
-`/scratch`: `/mnt/trivy-images/tmp` on the runner's large second volume when
-the runner is GitHub-hosted, `/mnt` is a mount point and `/mnt/trivy-images`
-does not already exist, otherwise a directory under `RUNNER_TEMP` (a notice
-says so). The removals run only on GitHub-hosted runners (the step checks
-`RUNNER_ENVIRONMENT`), which are single-use VMs; a self-hosted runner's
-toolchains are left alone and a notice says so. What is scanned and how the
-gate decides do not change; an image larger than roughly 20 GB uncompressed
-may still need a larger runner.
+present, and prints `df -h` for `/` and `RUNNER_TEMP` before and after. With
+`--image-src docker` Trivy exports a full uncompressed copy of the image into
+its `TMPDIR`, on top of the daemon's own copy, and on 2026-10-29 that filled
+the disk for `ghcr.io/open-webui/open-webui` and `ollama/ollama` ("no space
+left on device"). The removals are what make room: on a hosted `ubuntu-24.04`
+runner they took used space from 59 GB to 32 GB of 145 GB (2026-10-29 run).
+`/mnt` is not a separate volume on these runners, so there is no second disk
+to use. Trivy's `TMPDIR` is a scratch directory under `RUNNER_TEMP`, mounted
+at `/scratch`, so the export lands on the disk the step just freed instead of
+in the scanner container's overlay (a caller whose runner has a larger temp
+disk benefits automatically). The removals run only on GitHub-hosted runners
+(the step checks `RUNNER_ENVIRONMENT`), which are single-use VMs; a
+self-hosted runner's toolchains are left alone and a notice says so. What is
+scanned and how the gate decides do not change; an image larger than roughly
+40 GB uncompressed may still need a larger runner.
 
 ### Gitleaks
 
