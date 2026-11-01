@@ -1,6 +1,8 @@
-"""Pin the organization security baseline: the catalogue, the consumer templates and their rules."""
+"""Pin the organization security baseline: the catalogue, the consumer templates and their rules.
+
+The complete check of the public files against the organization's inventory runs privately.
+"""
 import glob
-import hashlib
 import os
 import re
 import unicodedata
@@ -59,36 +61,16 @@ def mutable_references(text):
 
 
 # The public catalogue and templates name the organization, this repository and @-mentions of the
-# code owner handle, and no other repository of the organization. Two detectors enforce it without
-# listing a single name here. (1) Anything that starts with "strange" other than the organization
-# and this repository is a finding: it catches misspellings and repositories created later.
-# (2) PRIVATE_NAME_DIGESTS holds the salted SHA-256 digest of every other organization repository
-# name (15 digests, computed over NAME_SALT + ":" + the lower-cased name), so names that do not
-# start with "strange" are caught too. A digest cannot be turned back into a name without guessing
-# it. The private audit, which reads the real inventory, remains the complete check. Matching is
-# case-insensitive and sees through Markdown escapes, width variants and zero-width characters.
+# code owner handle, and no other repository of the organization. This test carries one detector and
+# no list of names: anything that starts with "strange" other than the organization and this
+# repository is a finding, which catches misspellings and repositories created later. The one
+# exemption is the owner handle written directly after "@"; any other "@"-prefixed token that starts
+# with the prefix is a finding. A name that does not start with the prefix is outside this detector's
+# reach by design; the complete check against the organization's inventory runs privately. Matching
+# is case-insensitive and sees through Markdown escapes, width variants and zero-width characters.
 ALLOWED_TOKENS = ("strangebasisdevs", "strange_security")
 ALLOWED_HANDLES = ("strangebasis",)
-NAME_SALT = "strangebasisdevs-org-baseline-2026-11-01"
-PRIVATE_NAME_DIGESTS = (
-    "ddd55e597ead4833f2471b4e23472021ad292bc1698768655532acfd548c46e7",
-    "a021b3d94806c8597530fe094544185f66a97ebbdbcefdab27541c5a97b747d4",
-    "2f8ff6412010ceb15ca5fa2e66afaaddfa374024cebfcef9a22e6ce5b42989d7",
-    "6092608a66c4e305356d308d555d3d36d343c59b5214e606f284d619d4847fb2",
-    "462eef925b5766ac480ff8e721dec4bc5fc928b5c9f4aa43348274418d631d04",
-    "872d4e387724f27b47dcc5ba5ba4b1d9521c1292669eb60cd00cb8aebc8891de",
-    "53528c40a7bcb70bf90a61c701867e50bae305397649538071d300bac274f5be",
-    "d76e61c22a746a9538bd843265b5c7802297a79e8622d4da115fff73a8d03999",
-    "e0e7eebd1f4524ea587df07af7ce093fe1ee065a0b92f5c598eefa1f7849ae9c",
-    "b2ac980de93c00d116585505559746763746896951f5b6141fe14828c77100c9",
-    "7a8f86d220c5a1dde88ffd56c30a9c6ed085e66bafd0940ca57175401031594c",
-    "79425cfdd85a6693cfa0fc3e64b863c1ed7759bda43777bcce2025a297080edb",
-    "39e6f5f274a9c38cf0ee1d95a17b86cbb297a1c9e8e589c19c43442a308f4065",
-    "43810f1f35d7a270d9980be186e9a8ada4906203c5bdae4d17f4f061dcf540dc",
-    "9c0cb6f786a5f5dbd6c0e5418ac631803456b24f9d92ec9e8cade9e54cb06dc9",
-)
-NAME_PATTERN = re.compile(r"(?<![\w@])strange[\w-]*")
-TOKEN_PATTERN = re.compile(r"[a-z0-9_-]+")
+NAME_PATTERN = re.compile(r"(?<!\w)strange[\w-]*")
 ZERO_WIDTH = re.compile("[\u00ad\u200b-\u200f\u2060\ufeff]")
 RULESET_ID = re.compile(r"(?<![0-9A-Za-z])[0-9]{8}(?![0-9A-Za-z])")
 
@@ -99,47 +81,19 @@ def normalise(text):
     return text.replace("\\", "").lower()
 
 
-def name_digest(name):
-    return hashlib.sha256((NAME_SALT + ":" + name.lower()).encode("utf-8")).hexdigest()
-
-
-def digest_tokens(line, digests):
-    """Tokens of a normalised line whose salted digest is in `digests`.
-
-    A token is a maximal run of [a-z0-9_-]; every other character, "/" included, separates tokens. A token is also
-    split into its parts at "-" and "_", and every contiguous run of parts, rejoined with the original separators, is
-    tried: that catches a name inside a compound such as a file name (<prefix>-<name>-<suffix>.json) and a name with
-    leading or trailing separators. The handle written as @<handle> is the code owner, not a name.
-    """
-    found = []
-    for match in TOKEN_PATTERN.finditer(line):
-        token = match.group(0)
-        if token in ALLOWED_HANDLES and line[:match.start()].endswith("@"):
-            continue
-        pieces = re.split(r"([-_])", token)
-        words, separators = pieces[0::2], pieces[1::2]
-        candidates = set()
-        for first in range(len(words)):
-            for last in range(first, len(words)):
-                run = words[first]
-                for index in range(first, last):
-                    run += separators[index] + words[index + 1]
-                if run:
-                    candidates.add(run)
-        if any(name_digest(candidate) in digests for candidate in candidates):
-            found.append(token)
-    return found
-
-
-def private_findings(text, digests=None):
-    """Findings as "line N: token" for tokens that start with "strange" and are not allowed, tokens whose salted digest
-    is a private repository name, and 8-digit ids (ruleset ids)."""
-    digests = PRIVATE_NAME_DIGESTS if digests is None else digests
+def private_findings(text):
+    """Findings as "line N: token" for tokens that start with "strange" and are not allowed, and 8-digit ids (ruleset
+    ids). The owner handle is allowed only when it directly follows "@"."""
     found = []
     for number, line in enumerate(text.split("\n"), 1):
         line = normalise(line)
-        tokens = [token for token in NAME_PATTERN.findall(line) if token not in ALLOWED_TOKENS]
-        for token in digest_tokens(line, digests) + RULESET_ID.findall(line):
+        tokens = []
+        for match in NAME_PATTERN.finditer(line):
+            token = match.group(0)
+            if token in ALLOWED_TOKENS or (token in ALLOWED_HANDLES and line[:match.start()].endswith("@")):
+                continue
+            tokens.append(token)
+        for token in RULESET_ID.findall(line):
             if token not in tokens:
                 tokens.append(token)
         found.extend("line %d: %s" % (number, token) for token in tokens)
@@ -154,7 +108,8 @@ def template_paths():
 
 
 def public_files():
-    return [CATALOGUE] + template_paths()
+    # README.md is not listed until the owner has decided on it.
+    return [CATALOGUE, os.path.join(ROOT, "SECURITY.md"), os.path.join(ROOT, ".github", "CODEOWNERS")] + template_paths()
 
 
 class GateTemplate(unittest.TestCase):
@@ -326,59 +281,30 @@ class PublicContent(unittest.TestCase):
     def test_the_name_check_covers_the_catalogue_and_every_template(self):
         files = public_files()
         self.assertIn(CATALOGUE, files)
+        self.assertIn(os.path.join(ROOT, "SECURITY.md"), files)
+        self.assertIn(os.path.join(ROOT, ".github", "CODEOWNERS"), files)
+        for path in files:
+            self.assertTrue(os.path.isfile(path), path + " is missing")
         self.assertTrue(set(TEMPLATE_FILES) <= {os.path.basename(path) for path in template_paths()})
         self.assertTrue(set(template_paths()) <= set(files))
-        self.assertGreaterEqual(len(files), 1 + len(TEMPLATE_FILES))
-
-    def test_the_digest_function_is_pinned_by_a_public_value(self):
-        # The name of this repository is public. Its digest pins NAME_SALT, the ":" separator, the lower-casing and
-        # the hash, so changing any of them cannot leave the shipped digests dead while the suite stays green.
-        public = "1a3eb2a6bc906fa7a61f656a83f68076d66ed7b112aa31e406fcec58c3f5ae9e"
-        self.assertEqual(name_digest("strange_security"), public,
-                         "NAME_SALT or the digest format changed: recompute PRIVATE_NAME_DIGESTS")
-        self.assertEqual(name_digest("Strange_Security"), public, "digests are over the lower-cased name")
-        self.assertNotIn(public, PRIVATE_NAME_DIGESTS, "this repository's own name is not private")
-
-    def test_the_digest_list_is_well_formed(self):
-        self.assertEqual(len(PRIVATE_NAME_DIGESTS), 15)
-        self.assertEqual(len(set(PRIVATE_NAME_DIGESTS)), 15, "duplicate digest")
-        for digest in PRIVATE_NAME_DIGESTS:
-            self.assertRegex(digest, r"\A[0-9a-f]{64}\Z")
-
-    def test_digest_detector_catches_a_name_known_only_by_its_digest(self):
-        # A made-up name stands in for a real one. Its digest is computed here and added to a copy of the tuple
-        # under test, so no real name is written anywhere in this file.
-        digests = PRIVATE_NAME_DIGESTS + (name_digest("example_private_repo"), name_digest("example-private-repo"))
-        for text in ("Example\\_Private\\_Repo", "example_private_repo", "EXAMPLE_PRIVATE_REPO.", "see `Example_Private_Repo`",
-                     "strangebasisdevs/example_private_repo", "[example_private_repo](x)", "x/example_private_repo/y",
-                     "example\u200b_private_repo", "\uff45xample_private_repo", "-example_private_repo-",
-                     "Example\\-Private\\-Repo", "example-private-repo", "x/example-private-repo/y",
-                     "-example-private-repo-", "see `Example-Private-Repo`.",
-                     # A name inside a compound token, such as a ruleset file name.
-                     "rulesets/repo-example_private_repo-main.json", "repo-example-private-repo-main.json",
-                     "my_example_private_repo", "example_private_repo_x", "example-private-repo-x"):
-            with self.subTest(text=text):
-                self.assertEqual(private_findings("first line\n" + text, digests)[0][:8], "line 2: ", text)
-                self.assertNotEqual(private_findings(text, digests), [], text)
-                self.assertEqual(private_findings(text), [], "the shipped digest list must not know the made-up name")
-        finding = private_findings("a\nb\nsee Example\\_Private\\_Repo here", digests)
-        self.assertEqual(finding, ["line 3: example_private_repo"])
-        for text in ("example_private", "example_private_repository", "example private repo", "example-private",
-                     "example-private-repository", "private_repo", "example_repo", "example/private/repo"):
-            with self.subTest(text=text):
-                self.assertEqual(private_findings(text, digests), [], text)
+        self.assertGreaterEqual(len(files), 3 + len(TEMPLATE_FILES))
 
     def test_name_detector(self):
         # Fictitious names stand in for real ones: the prefix detector keys on "strange", not on a list.
         for bad in ("strange_example", "strangeexample", "strange-example", "strangebasis", "Strange_Example",
-                    "STRANGEEXAMPLE", "x-strange_example", "repo-strange-example-main.json", "strange\\_example", "strange\\-example", "strange\u200b_example",
-                    "\uff53trange_example"):
+                    "STRANGEEXAMPLE", "x-strange_example", "repo-strange-example-main.json", "strange\\_example",
+                    "strange\\-example", "strange\u200b_example", "\uff53trange_example",
+                    # An @-prefixed token is exempt only when it is the owner handle itself.
+                    "@strange_example", "@strangeexample", "@Strange_Example", "@strange\\_example", "@strangebasis-example",
+                    "@strangebasis_example", "@@strange_example"):
             for text in ("%s", "see %s.", "strangebasisdevs/%s", "(%s)", "`%s`", "[%s](x)"):
                 with self.subTest(text=text % bad):
-                    self.assertNotEqual(private_findings(text % bad), [], text % bad)
+                    found = private_findings("first line\n" + text % bad)
+                    self.assertNotEqual(found, [], "the detector missed: " + text % bad)
+                    self.assertEqual(found[0][:8], "line 2: ", "the finding for %r names the wrong line: %r" % (text % bad, found))
         for good in ("strangebasisdevs", "StrangeBasisDevs", "strangebasisdevs/strange_security",
-                     "strangebasisdevs/.github", "* @strangebasis", "@strangebasis", "strange_security",
-                     "my_strange_example", "xstrangebasis", "unstrange"):
+                     "strangebasisdevs/.github", "* @strangebasis", "@strangebasis", "see @strangebasis.", "(@StrangeBasis)",
+                     "strange_security", "my_strange\_example", "xstrangebasis", "unstrange"):
             with self.subTest(text=good):
                 self.assertEqual(private_findings(good), [], good)
 
