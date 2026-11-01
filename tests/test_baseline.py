@@ -64,10 +64,11 @@ def mutable_references(text):
 # code owner handle, and no other repository of the organization. This test carries one detector and
 # no list of names: anything that starts with "strange" other than the organization and this
 # repository is a finding, which catches misspellings and repositories created later. The one
-# exemption is the owner handle written directly after "@"; any other "@"-prefixed token that starts
-# with the prefix is a finding. A name that does not start with the prefix is outside this detector's
-# reach by design; the complete check against the organization's inventory runs privately. Matching
-# is case-insensitive and sees through Markdown escapes, width variants and zero-width characters.
+# exemption after "@" is the owner handle itself; any other "@"-prefixed token that starts with the
+# prefix is a finding, the organization and this repository included. A name that does not start with
+# the prefix is outside this detector's reach by design; the complete check against the organization's
+# inventory runs privately. Matching is case-insensitive and sees through Markdown escapes, width
+# variants and zero-width characters.
 ALLOWED_TOKENS = ("strangebasisdevs", "strange_security")
 ALLOWED_HANDLES = ("strangebasis",)
 NAME_PATTERN = re.compile(r"(?<!\w)strange[\w-]*")
@@ -90,7 +91,11 @@ def private_findings(text):
         tokens = []
         for match in NAME_PATTERN.finditer(line):
             token = match.group(0)
-            if token in ALLOWED_TOKENS or (token in ALLOWED_HANDLES and line[:match.start()].endswith("@")):
+            if line[:match.start()].endswith("@"):
+                exempt = token in ALLOWED_HANDLES
+            else:
+                exempt = token in ALLOWED_TOKENS
+            if exempt:
                 continue
             tokens.append(token)
         for token in RULESET_ID.findall(line):
@@ -294,17 +299,22 @@ class PublicContent(unittest.TestCase):
         for bad in ("strange_example", "strangeexample", "strange-example", "strangebasis", "Strange_Example",
                     "STRANGEEXAMPLE", "x-strange_example", "repo-strange-example-main.json", "strange\\_example",
                     "strange\\-example", "strange\u200b_example", "\uff53trange_example",
-                    # An @-prefixed token is exempt only when it is the owner handle itself.
+                    # Escape and zero-width folding must keep hiding the compound behind the owner handle.
+                    "stra\u200bnge_example", "@strangebasis\\_example", "@strangebasis\u200b_example",
+                    # After "@" only the owner handle is exempt, not the organization or this repository.
                     "@strange_example", "@strangeexample", "@Strange_Example", "@strange\\_example", "@strangebasis-example",
-                    "@strangebasis_example", "@@strange_example"):
+                    "@strangebasis_example", "@@strange_example", "@strangebasisdevs", "@strange_security"):
             for text in ("%s", "see %s.", "strangebasisdevs/%s", "(%s)", "`%s`", "[%s](x)"):
                 with self.subTest(text=text % bad):
                     found = private_findings("first line\n" + text % bad)
                     self.assertNotEqual(found, [], "the detector missed: " + text % bad)
                     self.assertEqual(found[0][:8], "line 2: ", "the finding for %r names the wrong line: %r" % (text % bad, found))
+        # The exact token survives escapes, case and zero-width characters.
+        self.assertEqual(private_findings("a\nsee @Strange\\_Ex\u200bample"), ["line 2: strange_example"])
+        self.assertEqual(private_findings("a\n@strangebasis\\_example"), ["line 2: strangebasis_example"])
         for good in ("strangebasisdevs", "StrangeBasisDevs", "strangebasisdevs/strange_security",
                      "strangebasisdevs/.github", "* @strangebasis", "@strangebasis", "see @strangebasis.", "(@StrangeBasis)",
-                     "strange_security", "my_strange\_example", "xstrangebasis", "unstrange"):
+                     "strange_security", "my_strange_example", "my_strange\\_example", "xstrangebasis", "unstrange"):
             with self.subTest(text=good):
                 self.assertEqual(private_findings(good), [], good)
 
