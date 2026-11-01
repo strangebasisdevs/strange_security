@@ -1,0 +1,46 @@
+# Dependabot version updates for a consumer repository.
+#
+# What to change:
+# - Copy this file to .github/dependabot.yml.
+# - Keep the github-actions entry: it moves the SHA pins of every action and of
+#   the security gate's reusable workflows.
+# - Add one entry per package ecosystem present in the repository (pip, npm,
+#   gomod, nuget, docker, gitsubmodule, ...) with the same schedule, the same
+#   cooldown and the same pull request limit. The commented-out entry at the end
+#   shows the shape.
+# - Do not exclude a directory or a dependency to quiet a pull request. If an
+#   exclusion is unavoidable, record it as a dated exception in the private
+#   governance ledger.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - github-actions
+    # Delay adopting a newly published release; compromised releases are usually
+    # caught and yanked quickly.
+    cooldown:
+      default-days: 7
+
+  # Example for a second ecosystem; uncomment, adjust package-ecosystem,
+  # directory and the second label, and repeat per ecosystem.
+  # - package-ecosystem: pip
+  #   directory: /
+  #   schedule:
+  #     interval: weekly
+  #     day: monday
+  #     time: "09:00"
+  #     timezone: Etc/UTC
+  #   open-pull-requests-limit: 10
+  #   labels:
+  #     - dependencies
+  #     - python
+  #   cooldown:
+  #     default-days: 7
