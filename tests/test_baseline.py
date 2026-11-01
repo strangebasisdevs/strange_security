@@ -12,14 +12,17 @@ TEMPLATE_FILES = ("security_gate.yml", "dependabot.yml", "SECURITY.md", "CODEOWN
 CATALOGUE = os.path.join(ROOT, "docs", "ORG_BASELINE.md")
 
 
-def read_path(*parts):
-    with open(os.path.join(ROOT, *parts), encoding="utf-8") as handle:
+def read_file(path):
+    with open(path, encoding="utf-8") as handle:
         return handle.read()
+
+
+def read_path(*parts):
+    return read_file(os.path.join(ROOT, *parts))
 
 
 def template(name):
-    with open(os.path.join(TEMPLATES, name), encoding="utf-8") as handle:
-        return handle.read()
+    return read_file(os.path.join(TEMPLATES, name))
 
 
 def active(text):
@@ -106,8 +109,7 @@ class GateTemplate(unittest.TestCase):
         self.assertEqual(mutable_references(template("security_gate.yml")), [])
         for path in template_paths():
             with self.subTest(template=os.path.relpath(path, ROOT)):
-                with open(path, encoding="utf-8") as handle:
-                    self.assertEqual(mutable_references(handle.read()), [])
+                self.assertEqual(mutable_references(read_file(path)), [])
 
     def test_mutable_reference_detector_notices_mutable_references(self):
         base = "    uses: strangebasisdevs/strange_security/.github/workflows/trivy.yml"
@@ -176,8 +178,7 @@ class GateTemplate(unittest.TestCase):
 
     def test_no_dangerous_trigger_in_any_template(self):
         for path in template_paths():
-            with open(path, encoding="utf-8") as handle:
-                text = handle.read()
+            text = read_file(path)
             for trigger in ("pull_request_target", "workflow_run"):
                 with self.subTest(template=os.path.relpath(path, ROOT), trigger=trigger):
                     self.assertNotIn(trigger, text, "%s must not appear in %s" % (trigger, path))
@@ -247,9 +248,8 @@ class PublicContent(unittest.TestCase):
     def test_no_repository_name_or_ruleset_id_in_public_files(self):
         for path in public_files():
             with self.subTest(file=os.path.relpath(path, ROOT)):
-                with open(path, encoding="utf-8") as handle:
-                    self.assertEqual(private_findings(handle.read()), [],
-                                     "names a private repository or carries a ruleset id")
+                self.assertEqual(private_findings(read_file(path)), [],
+                                 "names a private repository or carries a ruleset id")
 
     def test_name_detector(self):
         # Fictitious names stand in for real ones: the detector keys on the prefix, not on a list.
@@ -275,7 +275,7 @@ class PublicContent(unittest.TestCase):
                 self.assertIsNone(RULESET_ID.search(good), good)
 
     def test_catalogue_has_the_required_structure(self):
-        text = read_path("docs", "ORG_BASELINE.md")
+        text = read_file(CATALOGUE)
         controls = re.split(r"(?m)^### ", text.split("\n## Controls\n")[1].split("\n## Consumer files")[0])[1:]
         self.assertGreaterEqual(len(controls), 20)
         fields = ("Control ID", "Statement", "Rationale", "GitHub implementation", "Portable equivalent", "Verification")
@@ -297,7 +297,7 @@ class PublicContent(unittest.TestCase):
             self.assertIn("ORG-%02d" % number, ids)
 
     def test_catalogue_ends_with_the_consumer_files_section(self):
-        text = read_path("docs", "ORG_BASELINE.md")
+        text = read_file(CATALOGUE)
         self.assertIn("\n## Consumer files\n", text)
         self.assertTrue(text.rstrip().endswith(
             "Changes to this document go through a pull request reviewed like any other\nsecurity change."),
@@ -306,7 +306,7 @@ class PublicContent(unittest.TestCase):
         self.assertIn("baseline/templates/", text.split("\n## Consumer files\n")[1])
 
     def test_catalogue_names_and_finds_each_template(self):
-        text = read_path("docs", "ORG_BASELINE.md")
+        text = read_file(CATALOGUE)
         for name in TEMPLATE_FILES:
             with self.subTest(template=name):
                 self.assertIn("baseline/templates/" + name, text)
