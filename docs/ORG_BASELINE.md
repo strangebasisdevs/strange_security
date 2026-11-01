@@ -47,10 +47,11 @@ another forge such as Forgejo or GitLab, and how it is verified.
 - **Rationale:** History is the audit trail and the supply-chain root. A
   rewritten or unsigned history cannot be trusted, and a bypass list is a
   standing weakness.
-- **GitHub implementation:** A repository or organization ruleset targeting the
-  default branch with the rules that restrict deletions, block force pushes,
-  require linear history and require signed commits. The bypass list for these
-  rules is empty.
+- **GitHub implementation:** A ruleset of its own targeting the default branch
+  with the rules that restrict deletions, block force pushes, require linear
+  history and require signed commits. Bypass actors apply to a whole ruleset, so
+  this ruleset keeps these rules apart from the pull-request rule and its bypass
+  list is empty.
 - **Portable equivalent:** A protected branch with force-push and deletion
   disabled, a fast-forward or squash-only merge method, and a push rule that
   rejects unsigned commits (Forgejo and GitLab both offer these).
@@ -70,12 +71,14 @@ another forge such as Forgejo or GitLab, and how it is verified.
 - **Rationale:** A second pair of eyes on every change, on the code that will
   actually merge, is the main defence against a mistake or a compromised
   account. Squash keeps one signed, reviewed unit per change.
-- **GitHub implementation:** The pull-request rule of the same ruleset: pull
-  request required, code owner review required, stale approvals dismissed on
+- **GitHub implementation:** A separate ruleset on the default branch holds the
+  pull-request rule: pull request required, code owner review required, stale approvals dismissed on
   push, approval of the most recent push required, conversation resolution
-  required, and squash as the only allowed merge method. The bypass actor is the
-  organization administrator role, set to the pull-request bypass mode, so it
-  can only be used from a pull request and appears in the audit log.
+  required, and squash as the only allowed merge method. The one bypass actor of
+  this ruleset is the organization administrator role, set to the pull-request
+  bypass mode, so it covers only merging a pull request, can only be used from
+  a pull request and appears in the audit log. It never reaches the
+  default-branch integrity rules, which sit in the ruleset without bypass.
 - **Portable equivalent:** Protected-branch approval rules with code owner
   approval, approvals reset by new commits, an author-cannot-approve setting, an
   all-threads-resolved merge condition and a squash-only merge method.
@@ -89,9 +92,10 @@ another forge such as Forgejo or GitLab, and how it is verified.
 - **Statement:** The Semgrep static analysis, Trivy filesystem scan and Gitleaks
   history scan reusable workflows of strange_security are required status checks
   on the default branch. The checks are strict, so a branch must be up to date
-  before merging, and they have no bypass. A repository joins the gate once its
-  gate workflow has run green on its default branch; before that, the required
-  check would block its own first pull request.
+  before merging, and they have no bypass. The gate workflow runs on pull
+  requests and on pushes to the default branch. A repository joins the gate once
+  its gate workflow has run green on its default branch; before that, the
+  required check would block its own first pull request.
 - **Rationale:** Static analysis, dependency and secret scanning run the same way
   everywhere, are maintained in one place and cannot be switched off by the
   repository they scan.
@@ -259,8 +263,8 @@ another forge such as Forgejo or GitLab, and how it is verified.
   failing the pull request.
 - **Rationale:** Findings stay visible after a pull request merges, and a second
   analysis engine finds different problems.
-- **GitHub implementation:** SARIF upload from the Semgrep and Trivy gate
-  workflows, and CodeQL default setup on public repositories. A private
+- **GitHub implementation:** SARIF upload from the Semgrep, Trivy and Gitleaks
+  gate workflows, and CodeQL default setup on public repositories. A private
   repository without code scanning sets `upload-sarif: false` in its gate and
   keeps the checks.
 - **Portable equivalent:** The forge's SAST report or security dashboard, fed with
@@ -342,7 +346,7 @@ another forge such as Forgejo or GitLab, and how it is verified.
 - **Rationale:** An automated author needs a human reviewer, and an automated
   reviewer does not replace one. Approval and merge are the human decisions the
   gate relies on.
-- **GitHub implementation:** The ruleset has no bypass actor for an agent, and
+- **GitHub implementation:** No ruleset has a bypass actor for an agent, and
   code owners are people or teams, never apps. Agent accounts and apps get write
   access to branches and pull requests only, never to a default branch or to the
   rulesets. Auto-merge is off, so nobody can queue a merge on their behalf.

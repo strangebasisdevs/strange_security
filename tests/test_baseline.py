@@ -2,6 +2,7 @@
 import glob
 import os
 import re
+import unicodedata
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -53,26 +54,38 @@ def mutable_references(text):
     return found
 
 
-# Repositories of the organization that the public catalogue and templates must never name.
-PRIVATE_NAMES = (
-    "strange_ringtone", "strangeservers", "strange_practice", "strange_archive", "strange_workbench",
-    "strange_spectra", "GUDEsktop", "chaos_coordinator", "chaos-coordinator", "PeakVacationPlanner",
-    "time_decomposes", "strange_elements", "strange_waves", "strange_governance",
-)
-# Whole tokens only. "strangebasis" is a repository name only when it is not part of
-# "strangebasisdevs" (the organization) or the handle "@strangebasis".
-NAME_PATTERN = re.compile(
-    r"(?<![\w@-])(?:%s|strangebasis)(?![\w-])" % "|".join(re.escape(name) for name in PRIVATE_NAMES)
-)
+# The public catalogue and templates name the organization, this repository and @-mentions of the
+# code owner handle, and nothing else that starts with "strange". The complete check against the
+# organization's inventory runs in the private audit, which reads that inventory; no list of
+# repository names is kept in this public repository. Matching is case-insensitive.
+ALLOWED_TOKENS = ("strangebasisdevs", "strange_security")
+NAME_PATTERN = re.compile(r"(?<![\w@-])strange[\w-]*")
+ZERO_WIDTH = re.compile("[\u00ad\u200b-\u200f\u2060\ufeff]")
 RULESET_ID = re.compile(r"(?<![0-9A-Za-z])[0-9]{8}(?![0-9A-Za-z])")
 
 
+def normalise(text):
+    """Fold what hides a name from a plain search: width and case variants, Markdown escapes, zero-width characters."""
+    text = ZERO_WIDTH.sub("", unicodedata.normalize("NFKC", text))
+    return text.replace("\\", "").lower()
+
+
 def private_findings(text):
-    return NAME_PATTERN.findall(text) + RULESET_ID.findall(text)
+    """Tokens that start with "strange" and are not allowed, and 8-digit ids (ruleset ids)."""
+    text = normalise(text)
+    names = [token for token in NAME_PATTERN.findall(text) if token not in ALLOWED_TOKENS]
+    return names + RULESET_ID.findall(text)
+
+
+def template_paths():
+    """Every file under baseline/templates/, hidden files included."""
+    found = glob.glob(os.path.join(TEMPLATES, "**", "*"), recursive=True)
+    found += glob.glob(os.path.join(TEMPLATES, "**", ".*"), recursive=True)
+    return sorted({path for path in found if os.path.isfile(path)})
 
 
 def public_files():
-    return [CATALOGUE] + [os.path.join(TEMPLATES, name) for name in TEMPLATE_FILES]
+    return [CATALOGUE] + template_paths()
 
 
 class GateTemplate(unittest.TestCase):
@@ -91,9 +104,10 @@ class GateTemplate(unittest.TestCase):
 
     def test_gate_has_no_mutable_reference(self):
         self.assertEqual(mutable_references(template("security_gate.yml")), [])
-        for name in TEMPLATE_FILES:
-            with self.subTest(template=name):
-                self.assertEqual(mutable_references(template(name)), [])
+        for path in template_paths():
+            with self.subTest(template=os.path.relpath(path, ROOT)):
+                with open(path, encoding="utf-8") as handle:
+                    self.assertEqual(mutable_references(handle.read()), [])
 
     def test_mutable_reference_detector_notices_mutable_references(self):
         base = "    uses: strangebasisdevs/strange_security/.github/workflows/trivy.yml"
@@ -116,14 +130,30 @@ class GateTemplate(unittest.TestCase):
         text = template("security_gate.yml")
         self.assertRegex(text, r"(?m)^name: Security gate$")
         for key, name in (("semgrep", "Semgrep"), ("trivy", "Trivy"), ("gitleaks", "Gitleaks")):
-            self.assertRegex(text, r"(?m)^  %s:\n    name: %s\n    uses: " % (key, name),
-                             "the %s job must be named %s: the required check names derive from it" % (key, name))
+            self.assertRegex(
+                text,
+                r"(?m)^  %s:\n    name: %s\n    uses: strangebasisdevs/strange_security/\.github/workflows/%s\.yml@"
+                % (key, name, key),
+                "the %s job must be named %s and call %s.yml: the required check names derive from both" % (key, name, key))
         on = re.search(r"(?m)^on:\n((?:[ ]+.*\n)+)", text)
         self.assertIsNotNone(on, "the gate template has no on: block")
         self.assertEqual(
             [line.rstrip() for line in on.group(1).split("\n") if line.strip()],
             ["  pull_request:", "  push:", "    branches:", "      - main"],
             "the gate must trigger on pull_request and on push to main only")
+
+    def test_gate_jobs_are_exactly_the_three_block_style_calls(self):
+        text = template("security_gate.yml")
+        for line in active(text):
+            for flow in ("{", "["):
+                self.assertNotIn(flow, line, "flow-style YAML hides jobs from the line checks: " + line.strip())
+        jobs = active(text.split("\njobs:\n", 1)[1])
+        for line in jobs:
+            self.assertTrue(
+                re.match(r"  (?:semgrep|trivy|gitleaks):$", line) or re.match(r"    name: (?:Semgrep|Trivy|Gitleaks)$", line)
+                or GATE_USES.match(line),
+                "only the three jobs with a name and a uses line are allowed, found: " + line.strip())
+        self.assertEqual(len(jobs), 9, "three jobs of three lines each, found %d lines" % len(jobs))
 
     def test_gate_permissions_are_exactly_the_cap(self):
         text = template("security_gate.yml")
@@ -140,16 +170,22 @@ class GateTemplate(unittest.TestCase):
         header = template("security_gate.yml").split("name: Security gate")[0]
         self.assertTrue(header.startswith("#"), "the template must start with a header comment")
         for needle in ("gh api repos/strangebasisdevs/strange_security/git/ref/tags/", "upload-sarif: false",
-                       ".github/workflows/security_gate.yml", "Semgrep / Semgrep scan",
+                       ".github/workflows/security_gate.yml", "default branch", "Semgrep / Semgrep scan",
                        "Trivy / Trivy filesystem scan", "Gitleaks / Gitleaks history scan"):
             self.assertIn(needle, header)
 
     def test_no_dangerous_trigger_in_any_template(self):
-        for name in TEMPLATE_FILES:
-            text = template(name)
+        for path in template_paths():
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
             for trigger in ("pull_request_target", "workflow_run"):
-                with self.subTest(template=name, trigger=trigger):
-                    self.assertNotIn(trigger, text, "%s must not appear in %s" % (trigger, name))
+                with self.subTest(template=os.path.relpath(path, ROOT), trigger=trigger):
+                    self.assertNotIn(trigger, text, "%s must not appear in %s" % (trigger, path))
+
+    def test_the_templates_directory_holds_exactly_the_four_files(self):
+        found = sorted(os.path.relpath(path, TEMPLATES).replace(os.sep, "/") for path in template_paths())
+        self.assertEqual(found, sorted(TEMPLATE_FILES),
+                         "a new template must be added on purpose: update TEMPLATE_FILES and the catalogue together")
 
 
 class DependabotTemplate(unittest.TestCase):
@@ -187,7 +223,9 @@ class DependabotTemplate(unittest.TestCase):
 
 class PolicyTemplates(unittest.TestCase):
     def test_codeowners_default_rule_comes_first(self):
-        self.assertEqual(active(template("CODEOWNERS"))[0], "* @strangebasis")
+        lines = active(template("CODEOWNERS"))
+        self.assertTrue(lines and lines[0] == "* @strangebasis",
+                        "the CODEOWNERS template must start with '* @strangebasis', found %r" % lines[:1])
         self.assertTrue(template("CODEOWNERS").startswith("#"), "CODEOWNERS template needs a header comment")
 
     def test_security_template_header_and_content(self):
@@ -214,15 +252,18 @@ class PublicContent(unittest.TestCase):
                                      "names a private repository or carries a ruleset id")
 
     def test_name_detector(self):
-        for bad in PRIVATE_NAMES + ("strangebasis",):
-            for text in (bad, "see " + bad + ".", "strangebasisdevs/" + bad, "(%s)" % bad, "`%s`" % bad):
-                with self.subTest(text=text):
-                    self.assertTrue(NAME_PATTERN.search(text), text)
-        for good in ("strangebasisdevs", "strangebasisdevs/strange_security", "strangebasisdevs/.github",
-                     "* @strangebasis", "@strangebasis", "strange_security", "strange_archived", "my_strange_archive",
-                     "strange_archive-extra", "xstrangebasis"):
+        # Fictitious names stand in for real ones: the detector keys on the prefix, not on a list.
+        for bad in ("strange_example", "strangeexample", "strange-example", "strangebasis", "Strange_Example",
+                    "STRANGEEXAMPLE", "strange\\_example", "strange\\-example", "strange\u200b_example",
+                    "\uff53trange_example"):
+            for text in ("%s", "see %s.", "strangebasisdevs/%s", "(%s)", "`%s`", "[%s](x)"):
+                with self.subTest(text=text % bad):
+                    self.assertNotEqual(private_findings(text % bad), [], text % bad)
+        for good in ("strangebasisdevs", "StrangeBasisDevs", "strangebasisdevs/strange_security",
+                     "strangebasisdevs/.github", "* @strangebasis", "@strangebasis", "strange_security",
+                     "my_strange_example", "xstrangebasis", "unstrange"):
             with self.subTest(text=good):
-                self.assertIsNone(NAME_PATTERN.search(good), good)
+                self.assertEqual(private_findings(good), [], good)
 
     def test_ruleset_id_detector(self):
         for bad in ("ruleset 12345678", "id=12345678.", "(87654321)", "12345678"):
@@ -259,7 +300,9 @@ class PublicContent(unittest.TestCase):
         text = read_path("docs", "ORG_BASELINE.md")
         self.assertIn("\n## Consumer files\n", text)
         self.assertTrue(text.rstrip().endswith(
-            "Changes to this document go through a pull request reviewed like any other\nsecurity change."))
+            "Changes to this document go through a pull request reviewed like any other\nsecurity change."),
+            "ORG_BASELINE.md must end with 'Changes to this document go through a pull request reviewed like any "
+            "other security change.'")
         self.assertIn("baseline/templates/", text.split("\n## Consumer files\n")[1])
 
     def test_catalogue_names_and_finds_each_template(self):
@@ -291,10 +334,10 @@ class OutsideTheWorkflowDirectory(unittest.TestCase):
     def test_workflow_glob_does_not_reach_the_templates(self):
         workflows = os.path.join(ROOT, ".github", "workflows")
         reached = {os.path.realpath(path) for path in glob.glob(os.path.join(workflows, "*.yml"))}
-        for name in TEMPLATE_FILES:
-            self.assertNotIn(os.path.realpath(os.path.join(TEMPLATES, name)), reached, name)
-        self.assertNotIn("security_gate.yml", [os.path.basename(p) for p in glob.glob(os.path.join(TEMPLATES, "*"))
-                                              if os.path.dirname(p) == workflows])
+        for path in template_paths():
+            self.assertNotIn(os.path.realpath(path), reached, path)
+        self.assertFalse((os.path.realpath(TEMPLATES) + os.sep).startswith(os.path.realpath(workflows) + os.sep),
+                         "the templates directory must not sit under .github/workflows")
 
     def test_contract_job_and_workflow_tests_only_read_dot_github_workflows(self):
         gate = read_path(".github", "workflows", "security_gate.yml")

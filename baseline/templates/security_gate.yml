@@ -12,6 +12,9 @@
 #   gh api repos/strangebasisdevs/strange_security/git/tags/<object.sha> and use
 #   the commit SHA from its object.sha. If object.type is "commit", use it as is.
 # - Dependabot (see dependabot.yml) moves the pin afterwards.
+# - If the default branch is not main, replace "- main" below with its name:
+#   the gate must run on pushes to the default branch, because a repository
+#   joins the required checks only after the gate has run green there.
 # - Never reference @main or a tag, and never a short SHA. Every reference is a
 #   full 40-hex commit SHA followed by a "# vX.Y.Z" comment.
 # - A private repository without code scanning adds the commented-out
