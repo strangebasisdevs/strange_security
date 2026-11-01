@@ -91,13 +91,9 @@ def private_findings(text):
         tokens = []
         for match in NAME_PATTERN.finditer(line):
             token = match.group(0)
-            if line[:match.start()].endswith("@"):
-                exempt = token in ALLOWED_HANDLES
-            else:
-                exempt = token in ALLOWED_TOKENS
-            if exempt:
-                continue
-            tokens.append(token)
+            allowed = ALLOWED_HANDLES if line[:match.start()].endswith("@") else ALLOWED_TOKENS
+            if token not in allowed:
+                tokens.append(token)
         for token in RULESET_ID.findall(line):
             if token not in tokens:
                 tokens.append(token)
@@ -305,10 +301,11 @@ class PublicContent(unittest.TestCase):
                     "@strange_example", "@strangeexample", "@Strange_Example", "@strange\\_example", "@strangebasis-example",
                     "@strangebasis_example", "@@strange_example", "@strangebasisdevs", "@strange_security"):
             for text in ("%s", "see %s.", "strangebasisdevs/%s", "(%s)", "`%s`", "[%s](x)"):
-                with self.subTest(text=text % bad):
-                    found = private_findings("first line\n" + text % bad)
-                    self.assertNotEqual(found, [], "the detector missed: " + text % bad)
-                    self.assertEqual(found[0][:8], "line 2: ", "the finding for %r names the wrong line: %r" % (text % bad, found))
+                sample = text % bad
+                with self.subTest(text=sample):
+                    found = private_findings("first line\n" + sample)
+                    self.assertNotEqual(found, [], "the detector missed: " + sample)
+                    self.assertEqual(found[0][:8], "line 2: ", "the finding for %r names the wrong line: %r" % (sample, found))
         # The exact token survives escapes, case and zero-width characters.
         self.assertEqual(private_findings("a\nsee @Strange\\_Ex\u200bample"), ["line 2: strange_example"])
         self.assertEqual(private_findings("a\n@strangebasis\\_example"), ["line 2: strangebasis_example"])
