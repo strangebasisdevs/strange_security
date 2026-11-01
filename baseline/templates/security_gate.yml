@@ -1,0 +1,53 @@
+# Security gate: thin caller of the strange_security reusable workflows.
+#
+# What to change:
+# - Copy this file to .github/workflows/security_gate.yml in the consumer
+#   repository. Keep the file name and the job names: the required check names
+#   are "Semgrep / Semgrep scan", "Trivy / Trivy filesystem scan" and
+#   "Gitleaks / Gitleaks history scan", and they come from the job names below.
+# - Before copying, resolve the current release to a commit SHA and replace the
+#   pin on all three lines (same SHA, same release comment):
+#     gh api repos/strangebasisdevs/strange_security/git/ref/tags/<tag>
+#   If object.type is "tag" (an annotated tag), dereference it with
+#   gh api repos/strangebasisdevs/strange_security/git/tags/<object.sha> and use
+#   the commit SHA from its object.sha. If object.type is "commit", use it as is.
+# - Dependabot (see dependabot.yml) moves the pin afterwards.
+# - If the default branch is not main, replace "- main" below with its name:
+#   the gate must run on pushes to the default branch, because a repository
+#   joins the required checks only after the gate has run green there.
+# - Never reference @main or a tag, and never a short SHA. Every reference is a
+#   full 40-hex commit SHA followed by a "# vX.Y.Z" comment.
+# - A private repository without code scanning adds the commented-out
+#   "with: upload-sarif: false" lines of each job below, because SARIF cannot be
+#   uploaded there. The scans still run and still fail the pull request.
+name: Security gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  semgrep:
+    name: Semgrep
+    uses: strangebasisdevs/strange_security/.github/workflows/semgrep.yml@b3a6732ecbe1796fb2e7eaeedb228c705962db44 # v1.2.1
+    # with:
+    #   upload-sarif: false
+
+  trivy:
+    name: Trivy
+    uses: strangebasisdevs/strange_security/.github/workflows/trivy.yml@b3a6732ecbe1796fb2e7eaeedb228c705962db44 # v1.2.1
+    # with:
+    #   upload-sarif: false
+
+  gitleaks:
+    name: Gitleaks
+    uses: strangebasisdevs/strange_security/.github/workflows/gitleaks.yml@b3a6732ecbe1796fb2e7eaeedb228c705962db44 # v1.2.1
+    # with:
+    #   upload-sarif: false
