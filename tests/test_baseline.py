@@ -87,7 +87,7 @@ PRIVATE_NAME_DIGESTS = (
     "43810f1f35d7a270d9980be186e9a8ada4906203c5bdae4d17f4f061dcf540dc",
     "9c0cb6f786a5f5dbd6c0e5418ac631803456b24f9d92ec9e8cade9e54cb06dc9",
 )
-NAME_PATTERN = re.compile(r"(?<![\w@-])strange[\w-]*")
+NAME_PATTERN = re.compile(r"(?<![\w@])strange[\w-]*")
 TOKEN_PATTERN = re.compile(r"[a-z0-9_-]+")
 ZERO_WIDTH = re.compile("[\u00ad\u200b-\u200f\u2060\ufeff]")
 RULESET_ID = re.compile(r"(?<![0-9A-Za-z])[0-9]{8}(?![0-9A-Za-z])")
@@ -107,17 +107,27 @@ def digest_tokens(line, digests):
     """Tokens of a normalised line whose salted digest is in `digests`.
 
     A token is a maximal run of [a-z0-9_-]; every other character, "/" included, separates tokens. A token is also
-    tried without leading and trailing "-" and "_". The handle written as @<handle> is the code owner, not a name.
+    split into its parts at "-" and "_", and every contiguous run of parts, rejoined with the original separators, is
+    tried: that catches a name inside a compound such as a file name (<prefix>-<name>-<suffix>.json) and a name with
+    leading or trailing separators. The handle written as @<handle> is the code owner, not a name.
     """
     found = []
     for match in TOKEN_PATTERN.finditer(line):
         token = match.group(0)
         if token in ALLOWED_HANDLES and line[:match.start()].endswith("@"):
             continue
-        for candidate in {token, token.strip("-_")}:
-            if candidate and name_digest(candidate) in digests:
-                found.append(token)
-                break
+        pieces = re.split(r"([-_])", token)
+        words, separators = pieces[0::2], pieces[1::2]
+        candidates = set()
+        for first in range(len(words)):
+            for last in range(first, len(words)):
+                run = words[first]
+                for index in range(first, last):
+                    run += separators[index] + words[index + 1]
+                if run:
+                    candidates.add(run)
+        if any(name_digest(candidate) in digests for candidate in candidates):
+            found.append(token)
     return found
 
 
@@ -243,6 +253,11 @@ class GateTemplate(unittest.TestCase):
         found = sorted(os.path.relpath(path, TEMPLATES).replace(os.sep, "/") for path in template_paths())
         self.assertEqual(found, sorted(TEMPLATE_FILES),
                          "a new template must be added on purpose: update TEMPLATE_FILES and the catalogue together")
+        # An independent listing, so the hidden-file glob in template_paths() cannot silently stop working.
+        walked = sorted(os.path.relpath(os.path.join(dirpath, name), TEMPLATES).replace(os.sep, "/")
+                        for dirpath, _, names in os.walk(TEMPLATES) for name in names)
+        self.assertEqual(walked, sorted(TEMPLATE_FILES),
+                         "os.walk finds files that template_paths() does not report (hidden files?)")
 
 
 class DependabotTemplate(unittest.TestCase):
@@ -291,8 +306,9 @@ class PolicyTemplates(unittest.TestCase):
         header = text[:text.index("-->")]
         self.assertIn("strangebasisdevs/.github", header)
         self.assertIn("Private", header)
-        for needle in ("Supported versions", "Report a vulnerability", "Scope"):
-            self.assertIn(needle, text)
+        body = text[text.index("-->"):]
+        for heading in ("## Supported versions", "## Reporting a vulnerability", "## Scope"):
+            self.assertIn("\n" + heading + "\n", body, "the SECURITY.md template lost its section: " + heading)
 
     def test_every_template_starts_with_a_header_comment(self):
         for name in TEMPLATE_FILES:
@@ -307,6 +323,22 @@ class PublicContent(unittest.TestCase):
                 self.assertEqual(private_findings(read_file(path)), [],
                                  "%s names a private repository or carries a ruleset id" % os.path.relpath(path, ROOT))
 
+    def test_the_name_check_covers_the_catalogue_and_every_template(self):
+        files = public_files()
+        self.assertIn(CATALOGUE, files)
+        self.assertTrue(set(TEMPLATE_FILES) <= {os.path.basename(path) for path in template_paths()})
+        self.assertTrue(set(template_paths()) <= set(files))
+        self.assertGreaterEqual(len(files), 1 + len(TEMPLATE_FILES))
+
+    def test_the_digest_function_is_pinned_by_a_public_value(self):
+        # The name of this repository is public. Its digest pins NAME_SALT, the ":" separator, the lower-casing and
+        # the hash, so changing any of them cannot leave the shipped digests dead while the suite stays green.
+        public = "1a3eb2a6bc906fa7a61f656a83f68076d66ed7b112aa31e406fcec58c3f5ae9e"
+        self.assertEqual(name_digest("strange_security"), public,
+                         "NAME_SALT or the digest format changed: recompute PRIVATE_NAME_DIGESTS")
+        self.assertEqual(name_digest("Strange_Security"), public, "digests are over the lower-cased name")
+        self.assertNotIn(public, PRIVATE_NAME_DIGESTS, "this repository's own name is not private")
+
     def test_the_digest_list_is_well_formed(self):
         self.assertEqual(len(PRIVATE_NAME_DIGESTS), 15)
         self.assertEqual(len(set(PRIVATE_NAME_DIGESTS)), 15, "duplicate digest")
@@ -316,25 +348,30 @@ class PublicContent(unittest.TestCase):
     def test_digest_detector_catches_a_name_known_only_by_its_digest(self):
         # A made-up name stands in for a real one. Its digest is computed here and added to a copy of the tuple
         # under test, so no real name is written anywhere in this file.
-        digests = PRIVATE_NAME_DIGESTS + (name_digest("example_private_repo"),)
+        digests = PRIVATE_NAME_DIGESTS + (name_digest("example_private_repo"), name_digest("example-private-repo"))
         for text in ("Example\\_Private\\_Repo", "example_private_repo", "EXAMPLE_PRIVATE_REPO.", "see `Example_Private_Repo`",
                      "strangebasisdevs/example_private_repo", "[example_private_repo](x)", "x/example_private_repo/y",
-                     "example\u200b_private_repo", "\uff45xample_private_repo", "-example_private_repo-"):
+                     "example\u200b_private_repo", "\uff45xample_private_repo", "-example_private_repo-",
+                     "Example\\-Private\\-Repo", "example-private-repo", "x/example-private-repo/y",
+                     "-example-private-repo-", "see `Example-Private-Repo`.",
+                     # A name inside a compound token, such as a ruleset file name.
+                     "rulesets/repo-example_private_repo-main.json", "repo-example-private-repo-main.json",
+                     "my_example_private_repo", "example_private_repo_x", "example-private-repo-x"):
             with self.subTest(text=text):
                 self.assertEqual(private_findings("first line\n" + text, digests)[0][:8], "line 2: ", text)
                 self.assertNotEqual(private_findings(text, digests), [], text)
                 self.assertEqual(private_findings(text), [], "the shipped digest list must not know the made-up name")
         finding = private_findings("a\nb\nsee Example\\_Private\\_Repo here", digests)
         self.assertEqual(finding, ["line 3: example_private_repo"])
-        for text in ("example_private", "example_private_repository", "my_example_private_repo", "example private repo",
-                     "example_private_repo_x"):
+        for text in ("example_private", "example_private_repository", "example private repo", "example-private",
+                     "example-private-repository", "private_repo", "example_repo", "example/private/repo"):
             with self.subTest(text=text):
                 self.assertEqual(private_findings(text, digests), [], text)
 
     def test_name_detector(self):
         # Fictitious names stand in for real ones: the prefix detector keys on "strange", not on a list.
         for bad in ("strange_example", "strangeexample", "strange-example", "strangebasis", "Strange_Example",
-                    "STRANGEEXAMPLE", "strange\\_example", "strange\\-example", "strange\u200b_example",
+                    "STRANGEEXAMPLE", "x-strange_example", "repo-strange-example-main.json", "strange\\_example", "strange\\-example", "strange\u200b_example",
                     "\uff53trange_example"):
             for text in ("%s", "see %s.", "strangebasisdevs/%s", "(%s)", "`%s`", "[%s](x)"):
                 with self.subTest(text=text % bad):
@@ -349,6 +386,7 @@ class PublicContent(unittest.TestCase):
         for bad in ("ruleset 12345678", "id=12345678.", "(87654321)", "12345678"):
             with self.subTest(text=bad):
                 self.assertTrue(RULESET_ID.search(bad), bad)
+        self.assertEqual(private_findings("x\nruleset 12345678"), ["line 2: 12345678"])
         for good in ("1234567", "123456789", "2026-11-01", "b3a6732ecbe1796fb2e7eaeedb228c705962db44",
                      "a" * 8 + "12345678"):
             with self.subTest(text=good):
