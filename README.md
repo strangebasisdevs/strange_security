@@ -7,6 +7,11 @@ This repository provides reusable workflows for consistent static analysis,
 dependency vulnerability scanning, and secret detection across organization
 repositories. Results are uploaded to GitHub code scanning as SARIF.
 
+These workflows enforce the organization's security baseline, described in
+[docs/ORG_BASELINE.md](docs/ORG_BASELINE.md). The files a consumer repository
+copies (the security gate, Dependabot configuration, `SECURITY.md` and
+`CODEOWNERS`) are in [baseline/templates/](baseline/templates/).
+
 ## Security checks
 
 | Workflow | Checks | Fails the job on |

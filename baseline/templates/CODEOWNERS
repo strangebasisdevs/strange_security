@@ -1,0 +1,10 @@
+# Code owners: who "an approving review from a code owner" resolves to.
+#
+# What to change:
+# - Copy this file to .github/CODEOWNERS (not to the repository root).
+# - Add the protected paths below the default rule, each with its reviewer, and
+#   keep the default rule first: the last matching pattern wins, so path rules
+#   go after it. Protected paths are the exception and allowlist files that
+#   hide or permit a finding, for example the Semgrep, Trivy and Gitleaks ignore
+#   files, and the security gate workflow itself.
+* @strangebasis
