@@ -580,7 +580,7 @@ class Workflow(unittest.TestCase):
 
 class ExampleFromTheDocs(unittest.TestCase):
     def test_the_nextcloud_azurite_example_validates_and_allows_its_finding(self):
-        """The entry strangeservers adds, with this fixture's digests, validates and covers the finding."""
+        """The entry a consumer adds validates and covers the finding."""
         e = entry(image="nextcloud", target="var/www/html/3rdparty/microsoft/azure-storage-common/src/Common/Internal/Resources.php",
                   reason="Azurite development storage key, documented by Microsoft for the emulator; not a credential",
                   evidence=EVIDENCE)

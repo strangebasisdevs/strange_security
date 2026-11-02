@@ -471,8 +471,8 @@ dates, unless you give them (`--reason`, `--evidence`, `--reviewer`,
 completes it, and the command never overwrites a file (`--output` must be a
 new path, or the draft goes to standard output).
 
-Rollout for a consumer that carries such a value (for example `strangeservers`
-and the Azurite key in the `nextcloud` image):
+Rollout for a consumer that carries such a value (for example the Azurite key
+in the `nextcloud` image):
 
 1. Move the pin of `trivy-images.yml` to a release that has the
    `secret-allowlist-file` input. Without the file nothing is allowed.
