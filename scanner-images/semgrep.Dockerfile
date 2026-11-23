@@ -1,2 +1,2 @@
 # Single source of truth for the Semgrep scanner image; Dependabot keeps this tag+digest current.
-FROM semgrep/semgrep:1.181.0@sha256:81474464c1f07483ba0682a44787fd93c91397419762a04abe2bafaae396304b
+FROM semgrep/semgrep:1.185.0@sha256:67518c174185a2043fdbed16c70631b79209499b3671178e7194379b48295a0d
